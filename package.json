@@ -1,0 +1,53 @@
+{
+  "name": "zap",
+  "displayName": "Zap",
+  "version": "0.0.1",
+  "description": "Agentic browser automation extension with Plasmo + Next.js",
+  "author": "Krishav",
+  "contributors": [
+    "louisgv"
+  ],
+  "scripts": {
+    "start": "next start",
+    "dev": "run-p dev:*",
+    "dev:plasmo": "plasmo dev",
+    "dev:next": "next dev --port 1947",
+    "build": "run-p build:*",
+    "build:plasmo": "plasmo build",
+    "build:next": "next build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "14.2.35",
+    "plasmo": "0.90.5",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
+  },
+  "devDependencies": {
+    "@ianvs/prettier-plugin-sort-imports": "4.1.1",
+    "@plasmohq/rps": "1.8.7",
+    "@plasmohq/storage": "1.15.0",
+    "@types/chrome": "0.0.258",
+    "@types/node": "20.11.5",
+    "@types/react": "18.2.48",
+    "@types/react-dom": "18.2.18",
+    "autoprefixer": "^10.4.27",
+    "postcss": "^8.5.8",
+    "prettier": "3.2.4",
+    "tailwindcss": "^3.4.19",
+    "typescript": "5.3.3"
+  },
+  "manifest": {
+    "host_permissions": [
+      "http://*/*",
+      "https://*/*"
+    ],
+    "permissions": [
+      "tabs",
+      "activeTab",
+      "scripting",
+      "storage",
+      "sidePanel"
+    ]
+  }
+}
