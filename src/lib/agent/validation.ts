@@ -64,7 +64,10 @@ const isAction = (input: unknown): input is AgentAction => {
     case "extract_text":
       return typeof input.eid === "string"
     case "finish":
-      return typeof input.message === "string"
+      return (
+        typeof input.message === "string" &&
+        (input.success === undefined || typeof input.success === "boolean")
+      )
     default:
       return false
   }

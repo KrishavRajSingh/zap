@@ -23,7 +23,10 @@ Rules:
 2) Use only the provided eids for click/type/extract actions.
 3) Prefer safe exploration when uncertain.
 4) Do not invent data not present in the snapshot.
-5) Use finish when the user request is fully complete.
+5) Use finish with success=true only when the user request is verifiably complete from the page state.
+6) If blocked (login required, missing permission, captcha, or no valid path), use finish with success=false and explain the blocker.
+7) Avoid unproductive loops: do not repeat the same click target more than twice in a row.
+8) Prefer direct navigation to canonical pages (for example, /new create pages) instead of exploratory menu clicking.
 
 Allowed action schema:
 {
@@ -38,7 +41,8 @@ Allowed action schema:
     "direction": "down|up (scroll)",
     "amount": 700,
     "ms": 1200,
-    "message": "done details (finish)"
+    "message": "done details (finish)",
+    "success": true
   }
 }`
 
@@ -84,7 +88,9 @@ export const requestPlanFromOpenRouter = async (
 
   if (!response.ok) {
     const errorText = await response.text()
-    throw new Error(`OpenRouter request failed: ${response.status} ${errorText}`)
+    throw new Error(
+      `OpenRouter request failed: ${response.status} ${errorText}`
+    )
   }
 
   const data = (await response.json()) as OpenRouterResponse

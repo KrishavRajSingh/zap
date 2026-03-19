@@ -1,3 +1,8 @@
+import type {
+  AgentEvent,
+  AgentRuntimeMessage,
+  AgentStartMessage
+} from "~lib/agent/messages"
 import { rankCandidates } from "~lib/agent/ranking"
 import type {
   AgentAction,
@@ -7,11 +12,6 @@ import type {
   PageSnapshot
 } from "~lib/agent/types"
 import { AGENT_MAX_CANDIDATES, AGENT_MAX_STEPS } from "~lib/agent/types"
-import type {
-  AgentEvent,
-  AgentRuntimeMessage,
-  AgentStartMessage
-} from "~lib/agent/messages"
 import { isSensitiveAction } from "~lib/agent/validation"
 
 type PendingConfirmation = {
@@ -30,6 +30,16 @@ const sessions = new Map<string, RunSession>()
 
 const AGENT_API_BASE =
   process.env.PLASMO_PUBLIC_AGENT_API_BASE ?? "http://localhost:1947"
+
+const PLAN_REQUEST_TIMEOUT_MS = 30000
+const PLAN_MAX_ATTEMPTS = 3
+const PLAN_RETRY_BASE_DELAY_MS = 450
+const LOOP_REPEAT_THRESHOLD = 4
+const MAX_CONSECUTIVE_ACTION_ERRORS = 3
+const MAX_STAGNANT_CLICK_STEPS = 8
+
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)))
 
 const toErrorMessage = (error: unknown) => {
   if (error instanceof Error) {
@@ -134,7 +144,9 @@ const collectSnapshotInPage = () => {
     const rect = element.getBoundingClientRect()
     const hasSize = rect.width > 0 && rect.height > 0
     const styleVisible =
-      style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0"
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      style.opacity !== "0"
 
     return hasSize && styleVisible
   }
@@ -163,14 +175,14 @@ const collectSnapshotInPage = () => {
     const testId = element.getAttribute("data-testid")
 
     if (testId) {
-      return `[data-testid="${testId.replace(/"/g, "\\\"")}"]`
+      return `[data-testid="${testId.replace(/"/g, '\\"')}"]`
     }
 
     const name = element.getAttribute("name")
     const tag = element.tagName.toLowerCase()
 
     if (name) {
-      return `${tag}[name="${name.replace(/"/g, "\\\"")}"]`
+      return `${tag}[name="${name.replace(/"/g, '\\"')}"]`
     }
 
     const parts: string[] = []
@@ -252,7 +264,9 @@ const collectSnapshotInPage = () => {
     const htmlElement = element as HTMLElement
     const rect = element.getBoundingClientRect()
 
-    const text = normalize(htmlElement.innerText || htmlElement.textContent || "")
+    const text = normalize(
+      htmlElement.innerText || htmlElement.textContent || ""
+    )
     const placeholder = normalize(
       (htmlElement as HTMLInputElement | HTMLTextAreaElement).placeholder ?? ""
     )
@@ -265,7 +279,9 @@ const collectSnapshotInPage = () => {
       tagName: element.tagName.toLowerCase(),
       role: htmlElement.getAttribute("role"),
       inputType:
-        htmlElement instanceof HTMLInputElement ? htmlElement.type || "text" : null,
+        htmlElement instanceof HTMLInputElement
+          ? htmlElement.type || "text"
+          : null,
       text,
       label: getLabel(element),
       placeholder,
@@ -347,42 +363,74 @@ type DomActionResult = {
 
 const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
   const normalize = (value: string) => value.replace(/\s+/g, " ").trim()
+  const isVisibleElement = (element: HTMLElement) => {
+    const rect = element.getBoundingClientRect()
+    const style = window.getComputedStyle(element)
+
+    return (
+      rect.width > 0 &&
+      rect.height > 0 &&
+      style.visibility !== "hidden" &&
+      style.display !== "none"
+    )
+  }
 
   const resolveElement = (target: DomTarget) => {
     const exact = document.querySelector(target.selector)
+
+    if (exact instanceof HTMLElement && isVisibleElement(exact)) {
+      return exact
+    }
+
+    const options = Array.from(
+      document.querySelectorAll(target.tagName)
+    ).filter((option): option is HTMLElement => option instanceof HTMLElement)
+    const expectedText = normalize(target.text).toLowerCase()
+    const expectedLabel = normalize(target.label).toLowerCase()
+
+    const findMatch = (visibleOnly: boolean) => {
+      for (const option of options) {
+        if (visibleOnly && !isVisibleElement(option)) {
+          continue
+        }
+
+        const optionText = normalize(
+          option.innerText || option.textContent || ""
+        ).toLowerCase()
+
+        if (expectedText && optionText.includes(expectedText)) {
+          return option
+        }
+
+        const aria = normalize(
+          option.getAttribute("aria-label") ?? ""
+        ).toLowerCase()
+
+        if (expectedLabel && aria.includes(expectedLabel)) {
+          return option
+        }
+      }
+
+      return null
+    }
+
+    const visibleMatch = findMatch(true)
+
+    if (visibleMatch) {
+      return visibleMatch
+    }
 
     if (exact instanceof HTMLElement) {
       return exact
     }
 
-    const options = Array.from(document.querySelectorAll(target.tagName))
-    const expectedText = normalize(target.text).toLowerCase()
-    const expectedLabel = normalize(target.label).toLowerCase()
-
-    for (const option of options) {
-      if (!(option instanceof HTMLElement)) {
-        continue
-      }
-
-      const optionText = normalize(option.innerText || option.textContent || "").toLowerCase()
-
-      if (expectedText && optionText.includes(expectedText)) {
-        return option
-      }
-
-      const aria = normalize(option.getAttribute("aria-label") ?? "").toLowerCase()
-
-      if (expectedLabel && aria.includes(expectedLabel)) {
-        return option
-      }
-    }
-
-    return null
+    return findMatch(false)
   }
 
   try {
     if (payload.kind === "press_key") {
-      const active = (document.activeElement as HTMLElement | null) ?? document.body
+      const active =
+        (document.activeElement as HTMLElement | null) ?? document.body
       const eventInit = {
         key: payload.key,
         bubbles: true,
@@ -412,6 +460,16 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
       return { ok: false, details: "Target element not found" }
     }
 
+    const requiresVisibleTarget =
+      payload.kind === "click" || payload.kind === "type_text"
+
+    if (requiresVisibleTarget && !isVisibleElement(element)) {
+      return {
+        ok: false,
+        details: "Target element is not visible or interactable"
+      }
+    }
+
     if (payload.kind === "click") {
       element.scrollIntoView({ block: "center", inline: "center" })
       element.click()
@@ -423,31 +481,21 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
 
       return {
         ok: true,
-        details: text ? `Extracted text: ${text.slice(0, 240)}` : "Element has no text",
+        details: text
+          ? `Extracted text: ${text.slice(0, 240)}`
+          : "Element has no text",
         text
       }
-    }
-
-    if (
-      !(
-        element instanceof HTMLInputElement ||
-        element instanceof HTMLTextAreaElement ||
-        element instanceof HTMLSelectElement
-      )
-    ) {
-      return { ok: false, details: "Target is not an input element" }
     }
 
     element.scrollIntoView({ block: "center", inline: "center" })
     element.focus()
 
-    if (payload.clearFirst && "value" in element) {
-      ;(element as HTMLInputElement | HTMLTextAreaElement).value = ""
-    }
-
     if (element instanceof HTMLSelectElement) {
       const option = Array.from(element.options).find(
-        (item) => normalize(item.text).toLowerCase() === normalize(payload.text).toLowerCase()
+        (item) =>
+          normalize(item.text).toLowerCase() ===
+          normalize(payload.text).toLowerCase()
       )
 
       if (!option) {
@@ -459,12 +507,43 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
       return { ok: true, details: "Selected option" }
     }
 
-    ;(element as HTMLInputElement | HTMLTextAreaElement).value = payload.text
-    element.dispatchEvent(new Event("input", { bubbles: true }))
-    element.dispatchEvent(new Event("change", { bubbles: true }))
-    return { ok: true, details: "Typed text into target" }
+    if (
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement
+    ) {
+      if (payload.clearFirst) {
+        element.value = ""
+      }
+
+      element.value = payload.clearFirst
+        ? payload.text
+        : `${element.value}${payload.text}`
+      element.dispatchEvent(new Event("input", { bubbles: true }))
+      element.dispatchEvent(new Event("change", { bubbles: true }))
+      return { ok: true, details: "Typed text into target" }
+    }
+
+    if (element.isContentEditable) {
+      const existingText = element.textContent ?? ""
+
+      element.textContent = payload.clearFirst
+        ? payload.text
+        : `${existingText}${payload.text}`
+      element.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          data: payload.text,
+          inputType: payload.clearFirst ? "insertReplacementText" : "insertText"
+        })
+      )
+      element.dispatchEvent(new Event("change", { bubbles: true }))
+      return { ok: true, details: "Typed text into editable element" }
+    }
+
+    return { ok: false, details: "Target is not an editable element" }
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown page error"
+    const message =
+      error instanceof Error ? error.message : "Unknown page error"
 
     return {
       ok: false,
@@ -528,7 +607,10 @@ const runElementAction = async (
       args: [{ kind: "click", target } as DomActionPayload]
     })
 
-    return normalizeDomActionResult(rawResult, "Click action returned no result")
+    return normalizeDomActionResult(
+      rawResult,
+      "Click action returned no result"
+    )
   }
 
   if (action.type === "type_text") {
@@ -554,7 +636,10 @@ const runElementAction = async (
     args: [{ kind: "extract_text", target } as DomActionPayload]
   })
 
-  return normalizeDomActionResult(rawResult, "Extract action returned no result")
+  return normalizeDomActionResult(
+    rawResult,
+    "Extract action returned no result"
+  )
 }
 
 const executeAction = async (
@@ -580,7 +665,10 @@ const executeAction = async (
       args: [{ kind: "press_key", key: action.key } as DomActionPayload]
     })
 
-    return normalizeDomActionResult(rawResult, "Key press action returned no result")
+    return normalizeDomActionResult(
+      rawResult,
+      "Key press action returned no result"
+    )
   }
 
   if (action.type === "scroll") {
@@ -596,7 +684,10 @@ const executeAction = async (
       ]
     })
 
-    return normalizeDomActionResult(rawResult, "Scroll action returned no result")
+    return normalizeDomActionResult(
+      rawResult,
+      "Scroll action returned no result"
+    )
   }
 
   if (action.type === "finish") {
@@ -613,29 +704,101 @@ const executeAction = async (
   return runElementAction(tabId, candidate, action)
 }
 
+const shouldRetryPlanStatus = (status: number) => {
+  return status === 429 || status >= 500
+}
+
+const shouldRetryPlanError = (error: unknown) => {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return true
+  }
+
+  const message = toErrorMessage(error).toLowerCase()
+
+  return (
+    message.includes("failed to fetch") ||
+    message.includes("network") ||
+    message.includes("timeout") ||
+    message.includes("timed out")
+  )
+}
+
+const inferFinishSuccess = (message: string) => {
+  const lowered = message.toLowerCase()
+
+  const blockerPattern =
+    /unable|cannot|can't|could not|not logged in|log in|login|sign in|permission|access denied|blocked|captcha|failed|error|not possible/
+
+  return !blockerPattern.test(lowered)
+}
+
 const fetchPlan = async (
   command: string,
   snapshot: PageSnapshot,
   history: AgentStepRecord[]
 ) => {
-  const response = await fetch(`${AGENT_API_BASE}/api/agent/plan`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      command,
-      snapshot,
-      history
-    })
-  })
+  let lastError: Error | null = null
 
-  if (!response.ok) {
-    const errorText = await response.text()
-    throw new Error(`Planning request failed: ${response.status} ${errorText}`)
+  for (let attempt = 1; attempt <= PLAN_MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => {
+      controller.abort()
+    }, PLAN_REQUEST_TIMEOUT_MS)
+
+    try {
+      const response = await fetch(`${AGENT_API_BASE}/api/agent/plan`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          command,
+          snapshot,
+          history
+        }),
+        signal: controller.signal
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        const error = new Error(
+          `Planning request failed: ${response.status} ${errorText}`
+        )
+
+        lastError = error
+
+        if (
+          attempt < PLAN_MAX_ATTEMPTS &&
+          shouldRetryPlanStatus(response.status)
+        ) {
+          await sleep(PLAN_RETRY_BASE_DELAY_MS * attempt)
+          continue
+        }
+
+        throw error
+      }
+
+      return (await response.json()) as AgentPlan
+    } catch (error) {
+      lastError =
+        error instanceof Error ? error : new Error(toErrorMessage(error))
+
+      if (attempt < PLAN_MAX_ATTEMPTS && shouldRetryPlanError(error)) {
+        await sleep(PLAN_RETRY_BASE_DELAY_MS * attempt)
+        continue
+      }
+
+      throw lastError
+    } finally {
+      clearTimeout(timeout)
+    }
   }
 
-  return (await response.json()) as AgentPlan
+  throw new Error(
+    `Planning request failed after ${PLAN_MAX_ATTEMPTS} attempts: ${
+      lastError?.message ?? "Unknown error"
+    }`
+  )
 }
 
 const fetchAgentHealth = async () => {
@@ -691,6 +854,9 @@ const createSession = async (startMessage: AgentStartMessage) => {
 
 const runAgentLoop = async (session: RunSession) => {
   const runId = session.runId
+  const recentActionSignatures: string[] = []
+  const recentUrls: string[] = []
+  let consecutiveActionErrors = 0
 
   try {
     for (let step = 1; step <= AGENT_MAX_STEPS; step += 1) {
@@ -706,7 +872,11 @@ const runAgentLoop = async (session: RunSession) => {
         elements: rankedElements
       }
 
-      const plan = await fetchPlan(session.command, snapshotForPlanner, session.history)
+      const plan = await fetchPlan(
+        session.command,
+        snapshotForPlanner,
+        session.history
+      )
 
       await emitEvent({
         type: "step_planned",
@@ -717,11 +887,48 @@ const runAgentLoop = async (session: RunSession) => {
         snapshot: snapshotForPlanner
       })
 
-      if (plan.action.type === "finish") {
+      const actionSignature = `${fullSnapshot.url}|${JSON.stringify(plan.action)}`
+      recentActionSignatures.push(actionSignature)
+
+      if (recentActionSignatures.length > LOOP_REPEAT_THRESHOLD + 2) {
+        recentActionSignatures.shift()
+      }
+
+      let repeatedActionCount = 1
+
+      for (
+        let index = recentActionSignatures.length - 2;
+        index >= 0;
+        index -= 1
+      ) {
+        if (recentActionSignatures[index] !== actionSignature) {
+          break
+        }
+
+        repeatedActionCount += 1
+      }
+
+      if (repeatedActionCount >= LOOP_REPEAT_THRESHOLD) {
         await emitEvent({
           type: "run_finished",
           runId,
-          success: true,
+          success: false,
+          message:
+            "Stopped to avoid a loop: planner repeated the same action several times on the same page"
+        })
+
+        sessions.delete(runId)
+        return
+      }
+
+      if (plan.action.type === "finish") {
+        const success =
+          plan.action.success ?? inferFinishSuccess(plan.action.message)
+
+        await emitEvent({
+          type: "run_finished",
+          runId,
+          success,
           message: plan.action.message
         })
 
@@ -766,6 +973,20 @@ const runAgentLoop = async (session: RunSession) => {
       }
 
       session.history.push(record)
+      recentUrls.push(fullSnapshot.url)
+
+      if (recentUrls.length > MAX_STAGNANT_CLICK_STEPS) {
+        recentUrls.shift()
+      }
+
+      consecutiveActionErrors = execution.ok ? 0 : consecutiveActionErrors + 1
+
+      const recentRecords = session.history.slice(-MAX_STAGNANT_CLICK_STEPS)
+      const stagnantClickLoop =
+        recentRecords.length === MAX_STAGNANT_CLICK_STEPS &&
+        recentUrls.length === MAX_STAGNANT_CLICK_STEPS &&
+        recentRecords.every((item) => item.action.type === "click") &&
+        recentUrls.every((url) => url === recentUrls[0])
 
       await emitEvent({
         type: "step_result",
@@ -773,6 +994,32 @@ const runAgentLoop = async (session: RunSession) => {
         step,
         record
       })
+
+      if (stagnantClickLoop) {
+        await emitEvent({
+          type: "run_finished",
+          runId,
+          success: false,
+          message:
+            "Stopped to avoid a click loop on the same page; planner needs a different approach"
+        })
+
+        sessions.delete(runId)
+        return
+      }
+
+      if (consecutiveActionErrors >= MAX_CONSECUTIVE_ACTION_ERRORS) {
+        await emitEvent({
+          type: "run_finished",
+          runId,
+          success: false,
+          message:
+            "Stopped after repeated action failures; planner likely needs a different strategy"
+        })
+
+        sessions.delete(runId)
+        return
+      }
     }
 
     await emitEvent({
@@ -819,58 +1066,64 @@ chrome.runtime.onInstalled.addListener(() => {
     .catch(() => undefined)
 })
 
-chrome.runtime.onMessage.addListener((message: AgentRuntimeMessage, _, sendResponse) => {
-  if (message.type === "agent/start") {
-    createSession(message)
-      .then((session) => {
-        runAgentLoop(session).catch(async (error) => {
-          await emitEvent({
-            type: "run_error",
-            runId: session.runId,
-            message: toErrorMessage(error)
+chrome.runtime.onMessage.addListener(
+  (message: AgentRuntimeMessage, _, sendResponse) => {
+    if (message.type === "agent/start") {
+      createSession(message)
+        .then((session) => {
+          runAgentLoop(session).catch(async (error) => {
+            await emitEvent({
+              type: "run_error",
+              runId: session.runId,
+              message: toErrorMessage(error)
+            })
           })
+
+          sendResponse({ ok: true, runId: session.runId })
+        })
+        .catch((error) => {
+          sendResponse({ ok: false, error: toErrorMessage(error) })
         })
 
-        sendResponse({ ok: true, runId: session.runId })
-      })
-      .catch((error) => {
-        sendResponse({ ok: false, error: toErrorMessage(error) })
-      })
+      return true
+    }
 
-    return true
-  }
+    if (message.type === "agent/confirm") {
+      const session = sessions.get(message.runId)
 
-  if (message.type === "agent/confirm") {
-    const session = sessions.get(message.runId)
+      if (!session || !session.pendingConfirmation) {
+        sendResponse({ ok: false, error: "No pending confirmation found" })
+        return false
+      }
 
-    if (!session || !session.pendingConfirmation) {
-      sendResponse({ ok: false, error: "No pending confirmation found" })
+      session.pendingConfirmation.resolve(message.approve)
+      sendResponse({ ok: true })
       return false
     }
 
-    session.pendingConfirmation.resolve(message.approve)
-    sendResponse({ ok: true })
+    if (message.type === "agent/open-panel") {
+      openSidePanel()
+        .then(() => sendResponse({ ok: true }))
+        .catch((error) =>
+          sendResponse({ ok: false, error: toErrorMessage(error) })
+        )
+
+      return true
+    }
+
+    if (message.type === "agent/health") {
+      fetchAgentHealth()
+        .then((health) => sendResponse({ ok: true, health }))
+        .catch((error) =>
+          sendResponse({ ok: false, error: toErrorMessage(error) })
+        )
+
+      return true
+    }
+
+    sendResponse({ ok: false, error: "Unsupported message type" })
     return false
   }
-
-  if (message.type === "agent/open-panel") {
-    openSidePanel()
-      .then(() => sendResponse({ ok: true }))
-      .catch((error) => sendResponse({ ok: false, error: toErrorMessage(error) }))
-
-    return true
-  }
-
-  if (message.type === "agent/health") {
-    fetchAgentHealth()
-      .then((health) => sendResponse({ ok: true, health }))
-      .catch((error) => sendResponse({ ok: false, error: toErrorMessage(error) }))
-
-    return true
-  }
-
-  sendResponse({ ok: false, error: "Unsupported message type" })
-  return false
-})
+)
 
 export {}

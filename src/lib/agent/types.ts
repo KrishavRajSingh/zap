@@ -70,6 +70,7 @@ export type AgentAction =
   | {
       type: "finish"
       message: string
+      success?: boolean
     }
 
 export type AgentPlan = {
