@@ -7,6 +7,8 @@ import { rankCandidates } from "~lib/agent/ranking"
 import type {
   AgentAction,
   AgentPlan,
+  AgentRunLog,
+  AgentRunLogStep,
   AgentStepRecord,
   ElementCandidate,
   PageSnapshot
@@ -22,7 +24,10 @@ type RunSession = {
   runId: string
   command: string
   tabId: number
+  initialUrl: string
+  startedAt: string
   history: AgentStepRecord[]
+  runLogSteps: AgentRunLogStep[]
   pendingConfirmation: PendingConfirmation | null
 }
 
@@ -30,6 +35,8 @@ const sessions = new Map<string, RunSession>()
 
 const AGENT_API_BASE =
   process.env.PLASMO_PUBLIC_AGENT_API_BASE ?? "http://localhost:1947"
+const SHOULD_PERSIST_RUN_LOGS =
+  process.env.PLASMO_PUBLIC_AGENT_SAVE_RUN_LOGS?.trim().toLowerCase() === "true"
 
 const PLAN_REQUEST_TIMEOUT_MS = 30000
 const PLAN_MAX_ATTEMPTS = 3
@@ -37,6 +44,8 @@ const PLAN_RETRY_BASE_DELAY_MS = 450
 const LOOP_REPEAT_THRESHOLD = 4
 const MAX_CONSECUTIVE_ACTION_ERRORS = 3
 const MAX_STAGNANT_CLICK_STEPS = 8
+const MAX_STAGNANT_INTERACTION_STEPS = 8
+const RUN_LOG_REQUEST_TIMEOUT_MS = 12000
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)))
@@ -348,6 +357,7 @@ type DomActionPayload =
   | {
       kind: "press_key"
       key: string
+      target?: DomTarget
     }
   | {
       kind: "scroll"
@@ -429,17 +439,52 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
 
   try {
     if (payload.kind === "press_key") {
-      const active =
+      const activeElement =
         (document.activeElement as HTMLElement | null) ?? document.body
+      const targetElement = payload.target
+        ? resolveElement(payload.target)
+        : activeElement
+
+      if (!targetElement) {
+        return { ok: false, details: "Target element not found for key press" }
+      }
+
+      targetElement.focus()
+
       const eventInit = {
         key: payload.key,
         bubbles: true,
         cancelable: true
       }
 
-      active.dispatchEvent(new KeyboardEvent("keydown", eventInit))
-      active.dispatchEvent(new KeyboardEvent("keypress", eventInit))
-      active.dispatchEvent(new KeyboardEvent("keyup", eventInit))
+      targetElement.dispatchEvent(new KeyboardEvent("keydown", eventInit))
+      targetElement.dispatchEvent(new KeyboardEvent("keypress", eventInit))
+      targetElement.dispatchEvent(new KeyboardEvent("keyup", eventInit))
+
+      if (
+        payload.key === "Enter" &&
+        (targetElement instanceof HTMLInputElement ||
+          targetElement instanceof HTMLTextAreaElement ||
+          targetElement instanceof HTMLSelectElement)
+      ) {
+        const closestForm = targetElement.closest("form")
+        const form =
+          targetElement.form ??
+          (closestForm instanceof HTMLFormElement ? closestForm : null)
+
+        if (form) {
+          if (typeof form.requestSubmit === "function") {
+            form.requestSubmit()
+          } else {
+            form.submit()
+          }
+
+          return {
+            ok: true,
+            details: "Pressed key Enter and submitted form"
+          }
+        }
+      }
 
       return { ok: true, details: `Pressed key ${payload.key}` }
     }
@@ -659,10 +704,36 @@ const executeAction = async (
   }
 
   if (action.type === "press_key") {
+    let target: DomTarget | undefined
+
+    if (action.eid) {
+      const candidate = candidates.find((item) => item.eid === action.eid)
+
+      if (!candidate) {
+        return {
+          ok: false,
+          details: `Element ${action.eid} not available in snapshot`
+        }
+      }
+
+      target = {
+        selector: candidate.selector,
+        text: candidate.text,
+        label: candidate.label,
+        tagName: candidate.tagName
+      }
+    }
+
     const rawResult = await chrome.scripting.executeScript({
       target: { tabId },
       func: runDomActionInPage,
-      args: [{ kind: "press_key", key: action.key } as DomActionPayload]
+      args: [
+        {
+          kind: "press_key",
+          key: action.key,
+          target
+        } as DomActionPayload
+      ]
     })
 
     return normalizeDomActionResult(
@@ -826,6 +897,129 @@ const waitForConfirmation = (session: RunSession) => {
   })
 }
 
+type FinalRunState = {
+  success: boolean
+  message: string
+}
+
+const persistRunLog = async (
+  session: RunSession,
+  finalState: FinalRunState
+) => {
+  if (!SHOULD_PERSIST_RUN_LOGS) {
+    await emitEvent({
+      type: "run_log_saved",
+      runId: session.runId,
+      ok: true,
+      message: "Run log saving is disabled by PLASMO_PUBLIC_AGENT_SAVE_RUN_LOGS"
+    })
+    return
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => {
+    controller.abort()
+  }, RUN_LOG_REQUEST_TIMEOUT_MS)
+
+  const runLog: AgentRunLog = {
+    runId: session.runId,
+    command: session.command,
+    initialUrl: session.initialUrl,
+    startedAt: session.startedAt,
+    finishedAt: new Date().toISOString(),
+    final: {
+      success: finalState.success,
+      message: finalState.message
+    },
+    steps: session.runLogSteps
+  }
+
+  try {
+    const response = await fetch(`${AGENT_API_BASE}/api/agent/log`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(runLog),
+      signal: controller.signal
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      throw new Error(
+        `Log save request failed: ${response.status} ${errorText}`
+      )
+    }
+
+    const payload = (await response.json()) as {
+      ok?: boolean
+      path?: string
+      skipped?: boolean
+      message?: string
+      error?: string
+    }
+
+    if (payload.skipped) {
+      await emitEvent({
+        type: "run_log_saved",
+        runId: session.runId,
+        ok: true,
+        message:
+          payload.message ??
+          "Run log saving is disabled by PLASMO_PUBLIC_AGENT_SAVE_RUN_LOGS"
+      })
+      return
+    }
+
+    if (!payload.ok || typeof payload.path !== "string") {
+      throw new Error(
+        payload.error ?? payload.message ?? "Log save response was invalid"
+      )
+    }
+
+    await emitEvent({
+      type: "run_log_saved",
+      runId: session.runId,
+      ok: true,
+      path: payload.path,
+      message: `Saved run log to ${payload.path}`
+    })
+  } catch (error) {
+    await emitEvent({
+      type: "run_log_saved",
+      runId: session.runId,
+      ok: false,
+      message: `Failed to save run log: ${toErrorMessage(error)}`
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+const finalizeRunSession = async (
+  session: RunSession,
+  finalState: FinalRunState,
+  runErrorMessage?: string
+) => {
+  if (runErrorMessage) {
+    await emitEvent({
+      type: "run_error",
+      runId: session.runId,
+      message: runErrorMessage
+    })
+  }
+
+  await emitEvent({
+    type: "run_finished",
+    runId: session.runId,
+    success: finalState.success,
+    message: finalState.message
+  })
+
+  await persistRunLog(session, finalState)
+  sessions.delete(session.runId)
+}
+
 const createSession = async (startMessage: AgentStartMessage) => {
   const tab = await getCurrentTab()
   assertAutomatableUrl(tab.url)
@@ -836,7 +1030,10 @@ const createSession = async (startMessage: AgentStartMessage) => {
     runId,
     tabId: tab.id!,
     command: startMessage.command,
+    initialUrl: tab.url ?? "",
+    startedAt: new Date().toISOString(),
     history: [],
+    runLogSteps: [],
     pendingConfirmation: null
   }
 
@@ -878,6 +1075,20 @@ const runAgentLoop = async (session: RunSession) => {
         session.history
       )
 
+      const runLogStep: AgentRunLogStep = {
+        step,
+        plannedAt: new Date().toISOString(),
+        page: {
+          url: snapshotForPlanner.url,
+          title: snapshotForPlanner.title,
+          timestamp: snapshotForPlanner.timestamp
+        },
+        rationale: plan.rationale,
+        action: plan.action
+      }
+
+      session.runLogSteps.push(runLogStep)
+
       await emitEvent({
         type: "step_planned",
         runId,
@@ -909,15 +1120,11 @@ const runAgentLoop = async (session: RunSession) => {
       }
 
       if (repeatedActionCount >= LOOP_REPEAT_THRESHOLD) {
-        await emitEvent({
-          type: "run_finished",
-          runId,
+        await finalizeRunSession(session, {
           success: false,
           message:
             "Stopped to avoid a loop: planner repeated the same action several times on the same page"
         })
-
-        sessions.delete(runId)
         return
       }
 
@@ -925,36 +1132,40 @@ const runAgentLoop = async (session: RunSession) => {
         const success =
           plan.action.success ?? inferFinishSuccess(plan.action.message)
 
-        await emitEvent({
-          type: "run_finished",
-          runId,
+        await finalizeRunSession(session, {
           success,
           message: plan.action.message
         })
-
-        sessions.delete(runId)
         return
       }
 
       if (isSensitiveAction(plan.action, fullSnapshot.elements)) {
+        const confirmationReason = "This action appears destructive or final."
+
+        runLogStep.confirmation = {
+          required: true,
+          reason: confirmationReason,
+          approved: null
+        }
+
         await emitEvent({
           type: "confirmation_required",
           runId,
           action: plan.action,
-          reason: "This action appears destructive or final."
+          reason: confirmationReason
         })
 
         const approved = await waitForConfirmation(session)
         session.pendingConfirmation = null
 
+        runLogStep.confirmation.approved = approved
+        runLogStep.confirmation.resolvedAt = new Date().toISOString()
+
         if (!approved) {
-          await emitEvent({
-            type: "run_finished",
-            runId,
+          await finalizeRunSession(session, {
             success: false,
             message: "Action rejected by user"
           })
-          sessions.delete(runId)
           return
         }
       }
@@ -964,6 +1175,12 @@ const runAgentLoop = async (session: RunSession) => {
         plan.action,
         fullSnapshot.elements
       )
+
+      runLogStep.execution = {
+        result: execution.ok ? "success" : "error",
+        details: execution.details,
+        executedAt: new Date().toISOString()
+      }
 
       const record: AgentStepRecord = {
         step,
@@ -988,6 +1205,27 @@ const runAgentLoop = async (session: RunSession) => {
         recentRecords.every((item) => item.action.type === "click") &&
         recentUrls.every((url) => url === recentUrls[0])
 
+      const interactionActionTypes = new Set([
+        "click",
+        "type_text",
+        "press_key"
+      ])
+      const interactionRecords = session.history.slice(
+        -MAX_STAGNANT_INTERACTION_STEPS
+      )
+      const interactionActionSignatures = interactionRecords.map((item) =>
+        JSON.stringify(item.action)
+      )
+      const uniqueInteractionActions = new Set(interactionActionSignatures).size
+      const stagnantInteractionLoop =
+        interactionRecords.length === MAX_STAGNANT_INTERACTION_STEPS &&
+        recentUrls.length === MAX_STAGNANT_INTERACTION_STEPS &&
+        interactionRecords.every((item) =>
+          interactionActionTypes.has(item.action.type)
+        ) &&
+        recentUrls.every((url) => url === recentUrls[0]) &&
+        uniqueInteractionActions <= 3
+
       await emitEvent({
         type: "step_result",
         runId,
@@ -996,56 +1234,49 @@ const runAgentLoop = async (session: RunSession) => {
       })
 
       if (stagnantClickLoop) {
-        await emitEvent({
-          type: "run_finished",
-          runId,
+        await finalizeRunSession(session, {
           success: false,
           message:
             "Stopped to avoid a click loop on the same page; planner needs a different approach"
         })
+        return
+      }
 
-        sessions.delete(runId)
+      if (stagnantInteractionLoop) {
+        await finalizeRunSession(session, {
+          success: false,
+          message:
+            "Stopped to avoid a repeated interaction loop on the same page; planner should switch to direct navigation"
+        })
         return
       }
 
       if (consecutiveActionErrors >= MAX_CONSECUTIVE_ACTION_ERRORS) {
-        await emitEvent({
-          type: "run_finished",
-          runId,
+        await finalizeRunSession(session, {
           success: false,
           message:
             "Stopped after repeated action failures; planner likely needs a different strategy"
         })
-
-        sessions.delete(runId)
         return
       }
     }
 
-    await emitEvent({
-      type: "run_finished",
-      runId,
+    await finalizeRunSession(session, {
       success: false,
       message: "Max step limit reached"
     })
-
-    sessions.delete(runId)
     return
   } catch (error) {
-    await emitEvent({
-      type: "run_error",
-      runId,
-      message: toErrorMessage(error)
-    })
+    const message = toErrorMessage(error)
 
-    await emitEvent({
-      type: "run_finished",
-      runId,
-      success: false,
-      message: toErrorMessage(error)
-    })
-
-    sessions.delete(runId)
+    await finalizeRunSession(
+      session,
+      {
+        success: false,
+        message
+      },
+      message
+    )
     return
   }
 }

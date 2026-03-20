@@ -27,6 +27,7 @@ Rules:
 6) If blocked (login required, missing permission, captcha, or no valid path), use finish with success=false and explain the blocker.
 7) Avoid unproductive loops: do not repeat the same click target more than twice in a row.
 8) Prefer direct navigation to canonical pages (for example, /new create pages) instead of exploratory menu clicking.
+9) For Enter/search submissions, include the input eid in press_key so the key is sent to the correct field.
 
 Allowed action schema:
 {
@@ -34,7 +35,7 @@ Allowed action schema:
   "action": {
     "type": "open_url|click|type_text|press_key|scroll|wait|extract_text|finish",
     "url": "https://... (open_url)",
-    "eid": "e12 (click/type_text/extract_text)",
+    "eid": "e12 (click/type_text/extract_text, optional for press_key)",
     "text": "... (type_text)",
     "clearFirst": true,
     "key": "Enter (press_key)",

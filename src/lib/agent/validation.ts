@@ -53,7 +53,10 @@ const isAction = (input: unknown): input is AgentAction => {
     case "type_text":
       return typeof input.eid === "string" && typeof input.text === "string"
     case "press_key":
-      return typeof input.key === "string"
+      return (
+        typeof input.key === "string" &&
+        (input.eid === undefined || typeof input.eid === "string")
+      )
     case "scroll":
       return (
         (input.direction === "up" || input.direction === "down") &&

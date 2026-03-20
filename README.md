@@ -45,4 +45,5 @@ This runs both:
 
 - This version is website-automation first (no direct GitHub/Sheets API connectors).
 - Keep `.env` private. Only `OPENROUTER_API_KEY` is required to start planning.
+- Set `PLASMO_PUBLIC_AGENT_SAVE_RUN_LOGS=true` to write run logs into `.zap-logs/`.
 - Planner API health check: `http://localhost:1947/api/agent/health`

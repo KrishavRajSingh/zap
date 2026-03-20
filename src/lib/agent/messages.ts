@@ -1,4 +1,8 @@
-import type { AgentAction, AgentStepRecord, PageSnapshot } from "~lib/agent/types"
+import type {
+  AgentAction,
+  AgentStepRecord,
+  PageSnapshot
+} from "~lib/agent/types"
 
 export type AgentStartMessage = {
   type: "agent/start"
@@ -61,6 +65,13 @@ export type AgentEvent =
   | {
       type: "run_error"
       runId: string
+      message: string
+    }
+  | {
+      type: "run_log_saved"
+      runId: string
+      ok: boolean
+      path?: string
       message: string
     }
 

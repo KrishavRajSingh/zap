@@ -48,6 +48,10 @@ const actionSummary = (event: AgentEvent) => {
       : `Stopped: ${event.message}`
   }
 
+  if (event.type === "run_log_saved") {
+    return event.message
+  }
+
   return ""
 }
 
@@ -72,6 +76,10 @@ const eventLabel = (event: AgentEvent) => {
     return event.success ? "DONE" : "STOP"
   }
 
+  if (event.type === "run_log_saved") {
+    return event.ok ? "LOG" : "WARN"
+  }
+
   return "ERROR"
 }
 
@@ -93,6 +101,12 @@ const eventTone = (event: AgentEvent) => {
   if (event.type === "run_finished") {
     return event.success
       ? "border-emerald-300 bg-emerald-50 text-emerald-900"
+      : "border-amber-300 bg-amber-50 text-amber-900"
+  }
+
+  if (event.type === "run_log_saved") {
+    return event.ok
+      ? "border-sky-300 bg-sky-50 text-sky-900"
       : "border-amber-300 bg-amber-50 text-amber-900"
   }
 
@@ -166,6 +180,10 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
       }
 
       if (event.type === "run_error") {
+        setError(event.message)
+      }
+
+      if (event.type === "run_log_saved" && !event.ok) {
         setError(event.message)
       }
     }

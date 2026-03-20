@@ -53,6 +53,7 @@ export type AgentAction =
   | {
       type: "press_key"
       key: string
+      eid?: string
     }
   | {
       type: "scroll"
@@ -83,6 +84,42 @@ export type AgentStepRecord = {
   action: AgentAction
   result: "success" | "error"
   details: string
+}
+
+export type AgentRunLogStep = {
+  step: number
+  plannedAt: string
+  page: {
+    url: string
+    title: string
+    timestamp: string
+  }
+  rationale: string
+  action: AgentAction
+  confirmation?: {
+    required: boolean
+    reason: string
+    approved: boolean | null
+    resolvedAt?: string
+  }
+  execution?: {
+    result: "success" | "error"
+    details: string
+    executedAt: string
+  }
+}
+
+export type AgentRunLog = {
+  runId: string
+  command: string
+  initialUrl: string
+  startedAt: string
+  finishedAt: string
+  final: {
+    success: boolean
+    message: string
+  }
+  steps: AgentRunLogStep[]
 }
 
 export const AGENT_MAX_STEPS = 16
