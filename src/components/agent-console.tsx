@@ -28,6 +28,43 @@ const sendRuntimeMessage = async <T,>(message: AgentRuntimeMessage) => {
   })
 }
 
+const launchIdentityWebAuthFlow = async (url: string) => {
+  return new Promise<string>((resolve, reject) => {
+    chrome.identity.launchWebAuthFlow(
+      {
+        url,
+        interactive: true
+      },
+      (redirectedTo) => {
+        const lastError = chrome.runtime.lastError
+
+        if (lastError) {
+          reject(new Error(lastError.message))
+          return
+        }
+
+        if (!redirectedTo) {
+          reject(new Error("Google sign-in did not return a redirect URL"))
+          return
+        }
+
+        resolve(redirectedTo)
+      }
+    )
+  })
+}
+
+const readRedirectParam = (url: URL, key: string) => {
+  const fromSearch = url.searchParams.get(key)
+
+  if (fromSearch) {
+    return fromSearch
+  }
+
+  const hashParams = new URLSearchParams(url.hash.replace(/^#/, ""))
+  return hashParams.get(key)
+}
+
 const actionSummary = (event: AgentEvent) => {
   if (event.type === "step_planned") {
     return `Step ${event.step}: ${event.action.type}`
@@ -189,6 +226,9 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
   const [authEmail, setAuthEmail] = useState("")
   const [authPassword, setAuthPassword] = useState("")
   const [authBusy, setAuthBusy] = useState(false)
+  const [authPendingAction, setAuthPendingAction] = useState<
+    "google" | "sign_in" | "sign_up" | "sign_out" | null
+  >(null)
   const [authReady, setAuthReady] = useState(false)
   const [authUserEmail, setAuthUserEmail] = useState<string | null>(null)
   const [authStatus, setAuthStatus] = useState<string | null>(null)
@@ -349,6 +389,7 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
     }
 
     setAuthBusy(true)
+    setAuthPendingAction("sign_in")
     setAuthStatus(null)
     setAuthError(null)
 
@@ -372,6 +413,135 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
       setAuthError(cause instanceof Error ? cause.message : "Could not sign in")
     } finally {
       setAuthBusy(false)
+      setAuthPendingAction(null)
+    }
+  }
+
+  const signInWithGoogle = async () => {
+    if (!hasSupabaseBrowserEnv) {
+      setAuthError(
+        "Supabase is not configured. Set PLASMO_PUBLIC_SUPABASE_URL and PLASMO_PUBLIC_SUPABASE_ANON_KEY."
+      )
+      return
+    }
+
+    const hasIdentityApi =
+      typeof chrome !== "undefined" &&
+      typeof chrome.identity?.launchWebAuthFlow === "function" &&
+      typeof chrome.identity?.getRedirectURL === "function"
+
+    if (!hasIdentityApi) {
+      setAuthError(
+        "Google sign-in is unavailable. Make sure the extension has the identity permission and reload it."
+      )
+      return
+    }
+
+    let redirectTo = ""
+
+    setAuthBusy(true)
+    setAuthPendingAction("google")
+    setAuthStatus(null)
+    setAuthError(null)
+
+    try {
+      const supabase = getSupabaseBrowserClient()
+      redirectTo = chrome.identity.getRedirectURL()
+
+      const { data, error: oauthError } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo,
+          skipBrowserRedirect: true
+        }
+      })
+
+      if (oauthError) {
+        throw oauthError
+      }
+
+      if (!data.url) {
+        throw new Error("Could not start Google sign-in flow")
+      }
+
+      const redirectedTo = await launchIdentityWebAuthFlow(data.url)
+      const redirectedUrl = new URL(redirectedTo)
+      const oauthErrorCode = readRedirectParam(redirectedUrl, "error")
+      const oauthErrorDescription = readRedirectParam(
+        redirectedUrl,
+        "error_description"
+      )
+
+      if (oauthErrorCode || oauthErrorDescription) {
+        throw new Error(
+          oauthErrorDescription ??
+            `Google sign-in failed${oauthErrorCode ? `: ${oauthErrorCode}` : ""}`
+        )
+      }
+
+      const authCode = redirectedUrl.searchParams.get("code")
+      let session: Session | null = null
+
+      if (authCode) {
+        const { data: exchangeData, error: exchangeError } =
+          await supabase.auth.exchangeCodeForSession(authCode)
+
+        if (exchangeError) {
+          throw exchangeError
+        }
+
+        session = exchangeData.session
+      } else {
+        const accessToken = readRedirectParam(redirectedUrl, "access_token")
+        const refreshToken = readRedirectParam(redirectedUrl, "refresh_token")
+
+        if (!accessToken || !refreshToken) {
+          throw new Error(
+            "Google sign-in finished without a session token. Check Supabase OAuth settings."
+          )
+        }
+
+        const { data: sessionData, error: sessionError } =
+          await supabase.auth.setSession({
+            access_token: accessToken,
+            refresh_token: refreshToken
+          })
+
+        if (sessionError) {
+          throw sessionError
+        }
+
+        session = sessionData.session
+      }
+
+      if (!session?.user) {
+        throw new Error(
+          "Google sign-in completed but no user session was found"
+        )
+      }
+
+      await syncAuthSessionToRuntime(session)
+      setAuthUserEmail(session.user.email ?? null)
+      setAuthPassword("")
+      setAuthStatus(`Signed in as ${session.user.email ?? "Google user"}`)
+    } catch (cause) {
+      const message =
+        cause instanceof Error ? cause.message : "Could not sign in with Google"
+      const lowered = message.toLowerCase()
+
+      if (
+        redirectTo &&
+        (lowered.includes("redirect") || lowered.includes("redirect_uri"))
+      ) {
+        setAuthError(
+          `Google redirect is not allowed. Add ${redirectTo} to Supabase Auth redirect URLs and Google OAuth redirect settings.`
+        )
+      } else {
+        setAuthError(message)
+      }
+    } finally {
+      setAuthBusy(false)
+      setAuthPendingAction(null)
     }
   }
 
@@ -392,6 +562,7 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
     }
 
     setAuthBusy(true)
+    setAuthPendingAction("sign_up")
     setAuthStatus(null)
     setAuthError(null)
 
@@ -423,6 +594,7 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
       setAuthError(cause instanceof Error ? cause.message : "Could not sign up")
     } finally {
       setAuthBusy(false)
+      setAuthPendingAction(null)
     }
   }
 
@@ -432,6 +604,7 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
     }
 
     setAuthBusy(true)
+    setAuthPendingAction("sign_out")
     setAuthStatus(null)
     setAuthError(null)
 
@@ -460,6 +633,7 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
       )
     } finally {
       setAuthBusy(false)
+      setAuthPendingAction(null)
     }
   }
 
@@ -672,6 +846,10 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
   const buttonBaseClass =
     "rounded-lg border px-3 py-2 text-[12px] transition hover:-translate-y-px disabled:cursor-not-allowed disabled:opacity-45"
   const isSignedIn = Boolean(authUserEmail)
+  const googleAuthAvailable =
+    typeof chrome !== "undefined" &&
+    typeof chrome.identity?.launchWebAuthFlow === "function" &&
+    typeof chrome.identity?.getRedirectURL === "function"
 
   return (
     <div className={`${shellClass} flex flex-col gap-3 text-neutral-900`}>
@@ -683,7 +861,7 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
         <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
           {isSignedIn
             ? "Queue a command and watch each step execute in real time."
-            : "Sign in or create an account to start running commands."}
+            : "Sign in with Google or email to start running commands."}
         </p>
 
         {isSignedIn ? (
@@ -696,7 +874,7 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
               className="rounded-md border border-neutral-300 bg-neutral-50 px-2 py-1 text-[11px] text-neutral-900 transition hover:-translate-y-px disabled:cursor-not-allowed disabled:opacity-45"
               disabled={authBusy}
               onClick={signOut}>
-              {authBusy ? "Signing out..." : "Sign out"}
+              {authPendingAction === "sign_out" ? "Signing out..." : "Sign out"}
             </button>
           </div>
         ) : null}
@@ -715,6 +893,28 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
             </p>
           ) : (
             <>
+              <button
+                className={`${buttonBaseClass} flex items-center justify-center gap-2 border-neutral-900 bg-neutral-900 text-neutral-50 shadow-sm`}
+                disabled={authBusy || !authReady || !googleAuthAvailable}
+                onClick={signInWithGoogle}>
+                <span className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-full bg-white text-[11px] font-semibold text-neutral-900">
+                  G
+                </span>
+                <span>
+                  {authBusy && authPendingAction === "google"
+                    ? "Continuing with Google..."
+                    : "Continue with Google"}
+                </span>
+              </button>
+
+              <div className="my-1 flex items-center gap-2">
+                <span className="h-px flex-1 bg-neutral-300" />
+                <p className="m-0 text-[10px] uppercase tracking-[0.09em] text-neutral-500">
+                  or continue with email
+                </p>
+                <span className="h-px flex-1 bg-neutral-300" />
+              </div>
+
               <input
                 className="box-border w-full rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
                 onChange={(event) => setAuthEmail(event.target.value)}
@@ -729,18 +929,23 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
                 type="password"
                 value={authPassword}
               />
-              <div className="flex flex-wrap gap-2">
-                <button
-                  className={`${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`}
-                  disabled={authBusy || !authReady}
-                  onClick={signIn}>
-                  {authBusy ? "Working..." : "Sign In"}
-                </button>
+
+              <div className="flex flex-col gap-1">
                 <button
                   className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 text-neutral-900`}
                   disabled={authBusy || !authReady}
+                  onClick={signIn}>
+                  {authBusy && authPendingAction === "sign_in"
+                    ? "Signing in..."
+                    : "Sign in with Email"}
+                </button>
+                <button
+                  className="self-start rounded-md px-1 py-1 text-[11px] text-neutral-600 underline-offset-2 transition hover:text-neutral-900 hover:underline disabled:cursor-not-allowed disabled:opacity-45"
+                  disabled={authBusy || !authReady}
                   onClick={signUp}>
-                  {authBusy ? "Working..." : "Sign Up"}
+                  {authBusy && authPendingAction === "sign_up"
+                    ? "Creating account..."
+                    : "Need an account? Sign Up"}
                 </button>
               </div>
             </>

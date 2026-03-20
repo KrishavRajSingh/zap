@@ -46,6 +46,7 @@
     "permissions": [
       "tabs",
       "activeTab",
+      "identity",
       "scripting",
       "storage",
       "sidePanel"

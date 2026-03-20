@@ -38,7 +38,8 @@ export const getSupabaseBrowserClient = () => {
       auth: {
         autoRefreshToken: true,
         persistSession: true,
-        detectSessionInUrl: false
+        detectSessionInUrl: false,
+        flowType: "pkce"
       }
     })
   }

@@ -35,6 +35,13 @@ Also configure Supabase Auth URL settings:
 - `Site URL`: `http://localhost:1947`
 - `Redirect URLs`: `http://localhost:1947/auth/confirmed`
 
+If you want Google sign-in in the extension sidepanel:
+
+- Enable the Google auth provider in Supabase.
+- Add your extension redirect URL (from `chrome.identity.getRedirectURL()`) to Supabase Redirect URLs.
+- Add the same redirect URL to your Google OAuth client.
+- You can find the extension id in `chrome://extensions` and build the URL as `https://<extension-id>.chromiumapp.org/`.
+
 3. Install and run:
 
 ```bash
@@ -49,7 +56,7 @@ This runs both:
 
 4. Load extension from `build/chrome-mv3-dev` in `chrome://extensions`.
 
-5. Open the sidepanel and sign in (or sign up) before running commands.
+5. Open the sidepanel and sign in (Google or email/password) before running commands.
 
 ## Key paths
 
