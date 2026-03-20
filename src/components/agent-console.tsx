@@ -185,6 +185,7 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
   const [memoryAnswer, setMemoryAnswer] = useState("")
   const [memoryBusy, setMemoryBusy] = useState(false)
   const [memoryStatus, setMemoryStatus] = useState<string | null>(null)
+  const [memoryExpanded, setMemoryExpanded] = useState(false)
   const [authEmail, setAuthEmail] = useState("")
   const [authPassword, setAuthPassword] = useState("")
   const [authBusy, setAuthBusy] = useState(false)
@@ -440,10 +441,12 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
       await syncAuthSessionToRuntime(null)
       setAuthUserEmail(null)
       setAuthPassword("")
-      setAuthStatus("Signed out")
+      setAuthStatus(null)
       setRunId(null)
       setEvents([])
       setPendingConfirmation(null)
+      setMemoryExpanded(false)
+      setMemoryStatus(null)
       setError(null)
       setHealth(null)
     } catch (cause) {
@@ -465,13 +468,15 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
 
       if (!response.ok) {
         throw new Error(
-          "error" in response ? response.error : "Could not load memory"
+          "error" in response ? response.error : "Could not load saved answers"
         )
       }
 
       setMemoryEntries(response.entries)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not load memory")
+      setError(
+        cause instanceof Error ? cause.message : "Could not load saved answers"
+      )
     } finally {
       setMemoryBusy(false)
     }
@@ -482,7 +487,7 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
     const answer = memoryAnswer.trim()
 
     if (!question || !answer) {
-      setError("Memory question and answer are required")
+      setError("Field label and answer are required")
       return
     }
 
@@ -501,16 +506,16 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
 
       if (!response.ok) {
         throw new Error(
-          "error" in response ? response.error : "Could not save memory"
+          "error" in response ? response.error : "Could not save answer"
         )
       }
 
       setMemoryEntries(response.entries)
       setMemoryQuestion("")
       setMemoryAnswer("")
-      setMemoryStatus("Saved to memory vault")
+      setMemoryStatus("Saved answer")
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not save memory")
+      setError(cause instanceof Error ? cause.message : "Could not save answer")
     } finally {
       setMemoryBusy(false)
     }
@@ -529,15 +534,15 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
 
       if (!response.ok) {
         throw new Error(
-          "error" in response ? response.error : "Could not delete memory"
+          "error" in response ? response.error : "Could not delete answer"
         )
       }
 
       setMemoryEntries(response.entries)
-      setMemoryStatus("Removed from memory vault")
+      setMemoryStatus("Removed saved answer")
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Could not delete memory"
+        cause instanceof Error ? cause.message : "Could not delete answer"
       )
     } finally {
       setMemoryBusy(false)
@@ -675,85 +680,89 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
             ? "Queue a command and watch each step execute in real time."
             : "Sign in or create an account to start running commands."}
         </p>
+
+        {isSignedIn ? (
+          <div className="mt-1 flex items-center justify-between gap-2">
+            <p className="m-0 inline-flex min-w-0 max-w-[220px] items-center gap-2 rounded-full border border-neutral-300 bg-neutral-50 px-2 py-1 text-[11px] text-neutral-700">
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
+              <span className="truncate">{authUserEmail}</span>
+            </p>
+            <button
+              className="rounded-md border border-neutral-300 bg-neutral-50 px-2 py-1 text-[11px] text-neutral-900 transition hover:-translate-y-px disabled:cursor-not-allowed disabled:opacity-45"
+              disabled={authBusy}
+              onClick={signOut}>
+              {authBusy ? "Signing out..." : "Sign out"}
+            </button>
+          </div>
+        ) : null}
       </header>
 
-      <section className="flex flex-col gap-2 rounded-xl border border-neutral-300 bg-white p-[10px]">
-        <div className="flex items-center justify-between gap-2">
+      {!isSignedIn ? (
+        <section className="flex flex-col gap-2 rounded-xl border border-neutral-300 bg-white p-[10px]">
           <p className="m-0 text-[11px] uppercase tracking-[0.09em] text-neutral-500">
             Account
           </p>
-          <p className="m-0 rounded-full border border-neutral-300 bg-neutral-50 px-2 py-0.5 text-[10px] uppercase tracking-[0.08em] text-neutral-600">
-            {authUserEmail ? "Signed In" : "Signed Out"}
-          </p>
-        </div>
 
-        {!hasSupabaseBrowserEnv ? (
-          <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
-            Set PLASMO_PUBLIC_SUPABASE_URL and PLASMO_PUBLIC_SUPABASE_ANON_KEY,
-            then reload extension.
-          </p>
-        ) : authUserEmail ? (
-          <>
+          {!hasSupabaseBrowserEnv ? (
             <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
-              Signed in as {authUserEmail}
+              Set PLASMO_PUBLIC_SUPABASE_URL and
+              PLASMO_PUBLIC_SUPABASE_ANON_KEY, then reload extension.
             </p>
-            <div className="flex flex-wrap gap-2">
-              <button
-                className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 text-neutral-900`}
-                disabled={authBusy}
-                onClick={signOut}>
-                {authBusy ? "Working..." : "Sign Out"}
-              </button>
-            </div>
-          </>
-        ) : (
-          <>
-            <input
-              className="box-border w-full rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
-              onChange={(event) => setAuthEmail(event.target.value)}
-              placeholder="you@example.com"
-              type="email"
-              value={authEmail}
-            />
-            <input
-              className="box-border w-full rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
-              onChange={(event) => setAuthPassword(event.target.value)}
-              placeholder="Password"
-              type="password"
-              value={authPassword}
-            />
-            <div className="flex flex-wrap gap-2">
-              <button
-                className={`${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`}
-                disabled={authBusy || !authReady}
-                onClick={signIn}>
-                {authBusy ? "Working..." : "Sign In"}
-              </button>
-              <button
-                className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 text-neutral-900`}
-                disabled={authBusy || !authReady}
-                onClick={signUp}>
-                {authBusy ? "Working..." : "Sign Up"}
-              </button>
-            </div>
-          </>
-        )}
+          ) : (
+            <>
+              <input
+                className="box-border w-full rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
+                onChange={(event) => setAuthEmail(event.target.value)}
+                placeholder="you@example.com"
+                type="email"
+                value={authEmail}
+              />
+              <input
+                className="box-border w-full rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
+                onChange={(event) => setAuthPassword(event.target.value)}
+                placeholder="Password"
+                type="password"
+                value={authPassword}
+              />
+              <div className="flex flex-wrap gap-2">
+                <button
+                  className={`${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`}
+                  disabled={authBusy || !authReady}
+                  onClick={signIn}>
+                  {authBusy ? "Working..." : "Sign In"}
+                </button>
+                <button
+                  className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 text-neutral-900`}
+                  disabled={authBusy || !authReady}
+                  onClick={signUp}>
+                  {authBusy ? "Working..." : "Sign Up"}
+                </button>
+              </div>
+            </>
+          )}
 
-        {authStatus ? (
-          <p className="m-0 rounded-[10px] border border-sky-300 bg-sky-50 px-[10px] py-2 text-[12px] text-sky-900">
-            {authStatus}
-          </p>
-        ) : null}
+          {authStatus ? (
+            <p className="m-0 rounded-[10px] border border-sky-300 bg-sky-50 px-[10px] py-2 text-[12px] text-sky-900">
+              {authStatus}
+            </p>
+          ) : null}
 
-        {authError ? (
-          <p className="m-0 rounded-[10px] border border-red-300 bg-red-50 px-[10px] py-2 text-[12px] text-red-800">
-            {authError}
-          </p>
-        ) : null}
-      </section>
+          {authError ? (
+            <p className="m-0 rounded-[10px] border border-red-300 bg-red-50 px-[10px] py-2 text-[12px] text-red-800">
+              {authError}
+            </p>
+          ) : null}
+        </section>
+      ) : null}
 
       {isSignedIn ? (
         <>
+          {authError ? (
+            <div className="rounded-[10px] border border-red-300 bg-red-50 px-[10px] py-2 text-[12px] text-red-800">
+              {authError}
+            </div>
+          ) : null}
+
           <div className="flex flex-col gap-2 rounded-xl border border-neutral-300 bg-white p-[10px]">
             <label
               className="text-[11px] uppercase tracking-[0.09em] text-neutral-500"
@@ -792,83 +801,103 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
 
           <section className="flex flex-col gap-2 rounded-xl border border-neutral-300 bg-white p-[10px]">
             <div className="flex items-center justify-between gap-2">
-              <p className="m-0 text-[11px] uppercase tracking-[0.09em] text-neutral-500">
-                Memory Vault
-              </p>
-              <button
-                className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 px-2 py-1 text-[11px] text-neutral-700`}
-                disabled={memoryBusy}
-                onClick={loadMemoryEntries}>
-                Refresh
-              </button>
-            </div>
-
-            <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
-              Save question-answer pairs once. Zap fetches them only when a step
-              looks form-like.
-            </p>
-
-            <input
-              className="box-border w-full rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
-              onChange={(event) => setMemoryQuestion(event.target.value)}
-              placeholder="Question or field label (for example: What is your email?)"
-              value={memoryQuestion}
-            />
-            <textarea
-              className="box-border w-full max-w-full resize-y rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
-              onChange={(event) => setMemoryAnswer(event.target.value)}
-              placeholder="Answer value"
-              rows={compact ? 2 : 3}
-              value={memoryAnswer}
-            />
-
-            <div className="flex flex-wrap gap-2">
-              <button
-                className={`${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`}
-                disabled={
-                  memoryBusy ||
-                  memoryQuestion.trim().length === 0 ||
-                  memoryAnswer.trim().length === 0
-                }
-                onClick={saveMemoryEntry}>
-                {memoryBusy ? "Saving..." : "Save Pair"}
-              </button>
-            </div>
-
-            {memoryStatus ? (
-              <p className="m-0 rounded-[10px] border border-sky-300 bg-sky-50 px-[10px] py-2 text-[12px] text-sky-900">
-                {memoryStatus}
-              </p>
-            ) : null}
-
-            <div className="flex max-h-[200px] flex-col gap-2 overflow-auto rounded-lg border border-neutral-200 bg-neutral-50 p-2">
-              {memoryEntries.length === 0 ? (
-                <p className="m-0 text-[12px] text-neutral-600">
-                  No memory saved yet.
+              <div className="min-w-0">
+                <p className="m-0 text-[11px] uppercase tracking-[0.09em] text-neutral-500">
+                  Saved Answers
                 </p>
-              ) : (
-                memoryEntries.map((entry) => (
-                  <article
-                    className="rounded-lg border border-neutral-200 bg-white p-2"
-                    key={entry.id}>
-                    <p className="m-0 text-[11px] uppercase tracking-[0.08em] text-neutral-500">
-                      {entry.question}
-                    </p>
-                    <p className="m-0 mt-1 break-words text-[12px] leading-[1.45] text-neutral-800">
-                      {entry.answer}
-                    </p>
-                    <div className="mt-2 flex justify-end">
-                      <button
-                        className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 px-2 py-1 text-[11px] text-neutral-700`}
-                        disabled={memoryBusy}
-                        onClick={() => removeMemoryEntry(entry.id)}>
-                        Delete
-                      </button>
-                    </div>
-                  </article>
-                ))
-              )}
+                <p className="m-0 text-[11px] text-neutral-500">
+                  {memoryEntries.length} saved
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {memoryExpanded ? (
+                  <button
+                    className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 px-2 py-1 text-[11px] text-neutral-700`}
+                    disabled={memoryBusy}
+                    onClick={loadMemoryEntries}>
+                    Refresh
+                  </button>
+                ) : null}
+
+                <button
+                  className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 px-2 py-1 text-[11px] text-neutral-700`}
+                  onClick={() => setMemoryExpanded((previous) => !previous)}>
+                  {memoryExpanded ? "Hide" : "Manage"}
+                </button>
+              </div>
             </div>
+
+            {memoryExpanded ? (
+              <>
+                <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
+                  Save reusable answers for common form fields. Zap uses them
+                  when a step looks like form filling.
+                </p>
+
+                <input
+                  className="box-border w-full rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
+                  onChange={(event) => setMemoryQuestion(event.target.value)}
+                  placeholder="Field label or question (for example: What is your email?)"
+                  value={memoryQuestion}
+                />
+                <textarea
+                  className="box-border w-full max-w-full resize-y rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
+                  onChange={(event) => setMemoryAnswer(event.target.value)}
+                  placeholder="Saved answer"
+                  rows={compact ? 2 : 3}
+                  value={memoryAnswer}
+                />
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    className={`${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`}
+                    disabled={
+                      memoryBusy ||
+                      memoryQuestion.trim().length === 0 ||
+                      memoryAnswer.trim().length === 0
+                    }
+                    onClick={saveMemoryEntry}>
+                    {memoryBusy ? "Saving..." : "Save Answer"}
+                  </button>
+                </div>
+
+                {memoryStatus ? (
+                  <p className="m-0 rounded-[10px] border border-sky-300 bg-sky-50 px-[10px] py-2 text-[12px] text-sky-900">
+                    {memoryStatus}
+                  </p>
+                ) : null}
+
+                <div className="flex max-h-[200px] flex-col gap-2 overflow-auto rounded-lg border border-neutral-200 bg-neutral-50 p-2">
+                  {memoryEntries.length === 0 ? (
+                    <p className="m-0 text-[12px] text-neutral-600">
+                      No saved answers yet.
+                    </p>
+                  ) : (
+                    memoryEntries.map((entry) => (
+                      <article
+                        className="rounded-lg border border-neutral-200 bg-white p-2"
+                        key={entry.id}>
+                        <p className="m-0 text-[11px] uppercase tracking-[0.08em] text-neutral-500">
+                          {entry.question}
+                        </p>
+                        <p className="m-0 mt-1 break-words text-[12px] leading-[1.45] text-neutral-800">
+                          {entry.answer}
+                        </p>
+                        <div className="mt-2 flex justify-end">
+                          <button
+                            className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 px-2 py-1 text-[11px] text-neutral-700`}
+                            disabled={memoryBusy}
+                            onClick={() => removeMemoryEntry(entry.id)}>
+                            Delete
+                          </button>
+                        </div>
+                      </article>
+                    ))
+                  )}
+                </div>
+              </>
+            ) : null}
           </section>
 
           {error ? (
