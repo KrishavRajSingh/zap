@@ -1695,6 +1695,7 @@ const persistRunLog = async (
       type: "run_log_saved",
       runId: session.runId,
       ok: true,
+      skipped: true,
       message: "Run log saving is disabled by PLASMO_PUBLIC_AGENT_SAVE_RUN_LOGS"
     })
     return
@@ -1752,6 +1753,7 @@ const persistRunLog = async (
         type: "run_log_saved",
         runId: session.runId,
         ok: true,
+        skipped: true,
         message:
           payload.message ??
           "Run log saving is disabled by PLASMO_PUBLIC_AGENT_SAVE_RUN_LOGS"

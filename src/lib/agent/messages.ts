@@ -102,6 +102,7 @@ export type AgentEvent =
       type: "run_log_saved"
       runId: string
       ok: boolean
+      skipped?: boolean
       path?: string
       message: string
     }

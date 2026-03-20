@@ -238,10 +238,15 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
   }, [runId])
 
   const logs = useMemo(() => {
-    return events.map((event, index) => ({
-      key: `${index}-${event.type}`,
-      text: actionSummary(event)
-    }))
+    return events
+      .filter(
+        (event) => !(event.type === "run_log_saved" && event.skipped === true)
+      )
+      .map((event, index) => ({
+        key: `${index}-${event.type}`,
+        text: actionSummary(event),
+        event
+      }))
   }, [events])
 
   const syncAuthSessionToRuntime = async (session: Session | null) => {
@@ -950,8 +955,8 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
                   No run logs yet.
                 </p>
               ) : (
-                logs.map((log, index) => {
-                  const event = events[index]
+                logs.map((log) => {
+                  const event = log.event
 
                   return (
                     <div
