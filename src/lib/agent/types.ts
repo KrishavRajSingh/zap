@@ -15,6 +15,13 @@ export type ElementCandidate = {
   placeholder: string
   href: string
   valuePreview: string
+  questionText: string
+  describedBy: string
+  nameAttr: string
+  idAttr: string
+  autocomplete: string
+  required: boolean
+  maxLength: number | null
   selector: string
   context: string
   visible: boolean
@@ -33,6 +40,27 @@ export type PageSnapshot = {
   }
   visibleTextPreview: string[]
   elements: ElementCandidate[]
+}
+
+export type AgentMemoryEntry = {
+  id: string
+  question: string
+  answer: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type AgentMemoryUpsertInput = {
+  id?: string
+  question: string
+  answer: string
+}
+
+export type PlannerMemoryEntry = {
+  id: string
+  question: string
+  answer: string
+  updatedAt: string
 }
 
 export type AgentAction =

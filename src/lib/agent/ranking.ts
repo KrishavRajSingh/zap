@@ -17,6 +17,10 @@ export const rankCandidates = (
   const typingIntent =
     /\b(type|enter|fill|input|write|search|formula|cell)\b/.test(commandLower)
   const clickIntent = /\b(click|open|select|tap|press)\b/.test(commandLower)
+  const formIntent =
+    /\b(form|application|apply|profile|register|signup|sign up|submit)\b/.test(
+      commandLower
+    )
 
   const scored = candidates.map((candidate) => {
     const haystack = [
@@ -24,6 +28,11 @@ export const rankCandidates = (
       candidate.label,
       candidate.placeholder,
       candidate.valuePreview,
+      candidate.questionText,
+      candidate.describedBy,
+      candidate.nameAttr,
+      candidate.idAttr,
+      candidate.autocomplete,
       candidate.href,
       candidate.context,
       candidate.tagName,
@@ -82,6 +91,22 @@ export const rankCandidates = (
 
     if (typingIntent && !isEditable) {
       score -= 2
+    }
+
+    if (formIntent && isEditable) {
+      score += 2
+    }
+
+    if (candidate.required && isEditable) {
+      score += 1
+    }
+
+    if (candidate.label || candidate.questionText || candidate.placeholder) {
+      score += 1
+    }
+
+    if (candidate.inputType === "file") {
+      score -= 8
     }
 
     if (clickIntent && isButtonLike) {

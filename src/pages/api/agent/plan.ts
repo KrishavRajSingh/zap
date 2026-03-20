@@ -1,13 +1,28 @@
 import type { NextApiRequest, NextApiResponse } from "next"
 
-import { requestPlanFromOpenRouter } from "~lib/server/openrouter"
-import type { AgentStepRecord, PageSnapshot } from "~lib/agent/types"
+import type {
+  AgentStepRecord,
+  PageSnapshot,
+  PlannerMemoryEntry
+} from "~lib/agent/types"
 import { isObject } from "~lib/agent/validation"
+import { requestPlanFromOpenRouter } from "~lib/server/openrouter"
 
 type RequestBody = {
   command: string
   snapshot: PageSnapshot
   history: AgentStepRecord[]
+  memory?: PlannerMemoryEntry[]
+}
+
+const isValidMemoryEntry = (value: unknown): value is PlannerMemoryEntry => {
+  return (
+    isObject(value) &&
+    typeof value.id === "string" &&
+    typeof value.question === "string" &&
+    typeof value.answer === "string" &&
+    typeof value.updatedAt === "string"
+  )
 }
 
 const isValidBody = (body: unknown): body is RequestBody => {
@@ -15,7 +30,9 @@ const isValidBody = (body: unknown): body is RequestBody => {
     isObject(body) &&
     typeof body.command === "string" &&
     isObject(body.snapshot) &&
-    Array.isArray(body.history)
+    Array.isArray(body.history) &&
+    (body.memory === undefined ||
+      (Array.isArray(body.memory) && body.memory.every(isValidMemoryEntry)))
   )
 }
 

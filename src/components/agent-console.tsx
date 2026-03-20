@@ -5,6 +5,7 @@ import type {
   AgentEventEnvelope,
   AgentRuntimeMessage
 } from "~lib/agent/messages"
+import type { AgentMemoryEntry } from "~lib/agent/types"
 
 const sendRuntimeMessage = async <T,>(message: AgentRuntimeMessage) => {
   return new Promise<T>((resolve, reject) => {
@@ -142,6 +143,26 @@ type HealthResponse =
       error: string
     }
 
+type MemoryListResponse =
+  | {
+      ok: true
+      entries: AgentMemoryEntry[]
+    }
+  | {
+      ok: false
+      error: string
+    }
+
+type MemoryMutateResponse =
+  | {
+      ok: true
+      entries: AgentMemoryEntry[]
+    }
+  | {
+      ok: false
+      error: string
+    }
+
 export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
   const [command, setCommand] = useState("")
   const [runId, setRunId] = useState<string | null>(null)
@@ -151,6 +172,11 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
   const [health, setHealth] = useState<string | null>(null)
   const [pendingConfirmation, setPendingConfirmation] =
     useState<AgentEvent | null>(null)
+  const [memoryEntries, setMemoryEntries] = useState<AgentMemoryEntry[]>([])
+  const [memoryQuestion, setMemoryQuestion] = useState("")
+  const [memoryAnswer, setMemoryAnswer] = useState("")
+  const [memoryBusy, setMemoryBusy] = useState(false)
+  const [memoryStatus, setMemoryStatus] = useState<string | null>(null)
 
   useEffect(() => {
     const handler = (message: AgentEventEnvelope) => {
@@ -201,6 +227,99 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
       text: actionSummary(event)
     }))
   }, [events])
+
+  const loadMemoryEntries = async () => {
+    setMemoryBusy(true)
+
+    try {
+      const response = await sendRuntimeMessage<MemoryListResponse>({
+        type: "agent/memory/list"
+      })
+
+      if (!response.ok) {
+        throw new Error(
+          "error" in response ? response.error : "Could not load memory"
+        )
+      }
+
+      setMemoryEntries(response.entries)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not load memory")
+    } finally {
+      setMemoryBusy(false)
+    }
+  }
+
+  const saveMemoryEntry = async () => {
+    const question = memoryQuestion.trim()
+    const answer = memoryAnswer.trim()
+
+    if (!question || !answer) {
+      setError("Memory question and answer are required")
+      return
+    }
+
+    setMemoryBusy(true)
+    setMemoryStatus(null)
+    setError(null)
+
+    try {
+      const response = await sendRuntimeMessage<MemoryMutateResponse>({
+        type: "agent/memory/upsert",
+        entry: {
+          question,
+          answer
+        }
+      })
+
+      if (!response.ok) {
+        throw new Error(
+          "error" in response ? response.error : "Could not save memory"
+        )
+      }
+
+      setMemoryEntries(response.entries)
+      setMemoryQuestion("")
+      setMemoryAnswer("")
+      setMemoryStatus("Saved to memory vault")
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not save memory")
+    } finally {
+      setMemoryBusy(false)
+    }
+  }
+
+  const removeMemoryEntry = async (id: string) => {
+    setMemoryBusy(true)
+    setMemoryStatus(null)
+    setError(null)
+
+    try {
+      const response = await sendRuntimeMessage<MemoryMutateResponse>({
+        type: "agent/memory/delete",
+        id
+      })
+
+      if (!response.ok) {
+        throw new Error(
+          "error" in response ? response.error : "Could not delete memory"
+        )
+      }
+
+      setMemoryEntries(response.entries)
+      setMemoryStatus("Removed from memory vault")
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "Could not delete memory"
+      )
+    } finally {
+      setMemoryBusy(false)
+    }
+  }
+
+  useEffect(() => {
+    loadMemoryEntries().catch(() => undefined)
+  }, [])
 
   const startRun = async () => {
     const trimmed = command.trim()
@@ -329,6 +448,87 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
           </button>
         </div>
       </div>
+
+      <section className="flex flex-col gap-2 rounded-xl border border-neutral-300 bg-white p-[10px]">
+        <div className="flex items-center justify-between gap-2">
+          <p className="m-0 text-[11px] uppercase tracking-[0.09em] text-neutral-500">
+            Memory Vault
+          </p>
+          <button
+            className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 px-2 py-1 text-[11px] text-neutral-700`}
+            disabled={memoryBusy}
+            onClick={loadMemoryEntries}>
+            Refresh
+          </button>
+        </div>
+
+        <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
+          Save question-answer pairs once. Zap fetches them only when a step
+          looks form-like.
+        </p>
+
+        <input
+          className="box-border w-full rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
+          onChange={(event) => setMemoryQuestion(event.target.value)}
+          placeholder="Question or field label (for example: What is your email?)"
+          value={memoryQuestion}
+        />
+        <textarea
+          className="box-border w-full max-w-full resize-y rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
+          onChange={(event) => setMemoryAnswer(event.target.value)}
+          placeholder="Answer value"
+          rows={compact ? 2 : 3}
+          value={memoryAnswer}
+        />
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            className={`${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`}
+            disabled={
+              memoryBusy ||
+              memoryQuestion.trim().length === 0 ||
+              memoryAnswer.trim().length === 0
+            }
+            onClick={saveMemoryEntry}>
+            {memoryBusy ? "Saving..." : "Save Pair"}
+          </button>
+        </div>
+
+        {memoryStatus ? (
+          <p className="m-0 rounded-[10px] border border-sky-300 bg-sky-50 px-[10px] py-2 text-[12px] text-sky-900">
+            {memoryStatus}
+          </p>
+        ) : null}
+
+        <div className="flex max-h-[200px] flex-col gap-2 overflow-auto rounded-lg border border-neutral-200 bg-neutral-50 p-2">
+          {memoryEntries.length === 0 ? (
+            <p className="m-0 text-[12px] text-neutral-600">
+              No memory saved yet.
+            </p>
+          ) : (
+            memoryEntries.map((entry) => (
+              <article
+                className="rounded-lg border border-neutral-200 bg-white p-2"
+                key={entry.id}>
+                <p className="m-0 text-[11px] uppercase tracking-[0.08em] text-neutral-500">
+                  {entry.question}
+                </p>
+                <p className="m-0 mt-1 break-words text-[12px] leading-[1.45] text-neutral-800">
+                  {entry.answer}
+                </p>
+                <div className="mt-2 flex justify-end">
+                  <button
+                    className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 px-2 py-1 text-[11px] text-neutral-700`}
+                    disabled={memoryBusy}
+                    onClick={() => removeMemoryEntry(entry.id)}>
+                    Delete
+                  </button>
+                </div>
+              </article>
+            ))
+          )}
+        </div>
+      </section>
 
       {error ? (
         <div className="rounded-[10px] border border-red-300 bg-red-50 px-[10px] py-2 text-[12px] text-red-800">

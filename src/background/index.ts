@@ -6,15 +6,18 @@ import type {
 import { rankCandidates } from "~lib/agent/ranking"
 import type {
   AgentAction,
+  AgentMemoryEntry,
+  AgentMemoryUpsertInput,
   AgentPlan,
   AgentRunLog,
   AgentRunLogStep,
   AgentStepRecord,
   ElementCandidate,
-  PageSnapshot
+  PageSnapshot,
+  PlannerMemoryEntry
 } from "~lib/agent/types"
 import { AGENT_MAX_CANDIDATES, AGENT_MAX_STEPS } from "~lib/agent/types"
-import { isSensitiveAction } from "~lib/agent/validation"
+import { isObject, isSensitiveAction } from "~lib/agent/validation"
 
 type PendingConfirmation = {
   resolve: (approved: boolean) => void
@@ -29,6 +32,8 @@ type RunSession = {
   history: AgentStepRecord[]
   runLogSteps: AgentRunLogStep[]
   pendingConfirmation: PendingConfirmation | null
+  memoryLoaded: boolean
+  memoryCache: PlannerMemoryEntry[]
 }
 
 const sessions = new Map<string, RunSession>()
@@ -46,6 +51,15 @@ const MAX_CONSECUTIVE_ACTION_ERRORS = 3
 const MAX_STAGNANT_CLICK_STEPS = 8
 const MAX_STAGNANT_INTERACTION_STEPS = 8
 const RUN_LOG_REQUEST_TIMEOUT_MS = 12000
+const AGENT_MEMORY_STORAGE_KEY = "agent_memory_v1"
+const AGENT_MEMORY_MAX_ENTRIES = 160
+const AGENT_MEMORY_MAX_QUESTION_LENGTH = 220
+const AGENT_MEMORY_MAX_ANSWER_LENGTH = 1600
+const AGENT_MEMORY_MAX_PLANNER_ITEMS = 48
+const AGENT_MEMORY_MAX_PLANNER_QUESTION_LENGTH = 180
+const AGENT_MEMORY_MAX_PLANNER_ANSWER_LENGTH = 520
+const AGENT_MEMORY_MIN_RECENT_CONTEXT_ITEMS = 8
+const AGENT_FORM_MAX_CANDIDATES = 140
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)))
@@ -56,6 +70,348 @@ const toErrorMessage = (error: unknown) => {
   }
 
   return "Unknown error"
+}
+
+const FORM_INTENT_PATTERN =
+  /\b(fill|form|apply|signup|sign up|register|checkout|check out|billing|shipping|profile|contact|autofill|resume|cv|type|enter)\b/
+const FORM_FIELD_HINT_PATTERN =
+  /\b(name|first|last|surname|email|phone|mobile|address|street|city|state|province|zip|postal|country|company|title|job|linkedin|github|website|portfolio|dob|birth|password|username|card|cvv|iban|swift|bank|tax|ssn|aadhaar|passport|otp|verification)\b/
+
+const MEMORY_MATCH_STOPWORDS = new Set([
+  "the",
+  "and",
+  "your",
+  "with",
+  "from",
+  "that",
+  "this",
+  "what",
+  "which",
+  "when",
+  "where",
+  "who",
+  "how",
+  "have",
+  "has",
+  "been",
+  "was",
+  "were",
+  "for",
+  "into",
+  "about",
+  "please",
+  "would",
+  "should",
+  "could",
+  "will",
+  "you",
+  "are",
+  "any"
+])
+
+const MEMORY_ALIAS_GROUPS = [
+  ["email", "e-mail", "mail"],
+  ["phone", "mobile", "cell", "whatsapp", "contact"],
+  ["first name", "last name", "surname", "name", "fullname"],
+  ["company", "startup", "organization", "organisation"],
+  ["website", "url", "portfolio", "linkedin", "github"],
+  [
+    "address",
+    "street",
+    "city",
+    "state",
+    "province",
+    "postal",
+    "zip",
+    "country"
+  ],
+  ["dob", "date of birth", "birthday", "birth"],
+  ["description", "summary", "about", "what does"],
+  ["revenue", "income", "arr", "mrr"],
+  ["location", "based", "live"]
+]
+
+const normalizeText = (value: string) => value.replace(/\s+/g, " ").trim()
+
+const byUpdatedAtDesc = (
+  left: { updatedAt: string },
+  right: { updatedAt: string }
+) => {
+  return right.updatedAt.localeCompare(left.updatedAt)
+}
+
+const sanitizeMemoryEntry = (value: unknown): AgentMemoryEntry | null => {
+  if (!isObject(value)) {
+    return null
+  }
+
+  if (
+    typeof value.id !== "string" ||
+    typeof value.question !== "string" ||
+    typeof value.answer !== "string"
+  ) {
+    return null
+  }
+
+  const question = normalizeText(value.question).slice(
+    0,
+    AGENT_MEMORY_MAX_QUESTION_LENGTH
+  )
+  const answer = normalizeText(value.answer).slice(
+    0,
+    AGENT_MEMORY_MAX_ANSWER_LENGTH
+  )
+
+  if (!question || !answer) {
+    return null
+  }
+
+  const createdAt =
+    typeof value.createdAt === "string"
+      ? value.createdAt
+      : typeof value.updatedAt === "string"
+        ? value.updatedAt
+        : new Date().toISOString()
+  const updatedAt =
+    typeof value.updatedAt === "string" ? value.updatedAt : createdAt
+
+  return {
+    id: value.id,
+    question,
+    answer,
+    createdAt,
+    updatedAt
+  }
+}
+
+const readStoredMemoryEntries = async (): Promise<AgentMemoryEntry[]> => {
+  const stored = await chrome.storage.local.get(AGENT_MEMORY_STORAGE_KEY)
+  const rawEntries = stored[AGENT_MEMORY_STORAGE_KEY]
+
+  if (!Array.isArray(rawEntries)) {
+    return []
+  }
+
+  return rawEntries
+    .map((entry) => sanitizeMemoryEntry(entry))
+    .filter((entry): entry is AgentMemoryEntry => entry !== null)
+    .sort(byUpdatedAtDesc)
+    .slice(0, AGENT_MEMORY_MAX_ENTRIES)
+}
+
+const writeStoredMemoryEntries = async (entries: AgentMemoryEntry[]) => {
+  await chrome.storage.local.set({
+    [AGENT_MEMORY_STORAGE_KEY]: entries
+  })
+}
+
+const createMemoryId = () => {
+  return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
+}
+
+const upsertStoredMemoryEntry = async (input: AgentMemoryUpsertInput) => {
+  const question = normalizeText(input.question).slice(
+    0,
+    AGENT_MEMORY_MAX_QUESTION_LENGTH
+  )
+  const answer = normalizeText(input.answer).slice(
+    0,
+    AGENT_MEMORY_MAX_ANSWER_LENGTH
+  )
+
+  if (!question || !answer) {
+    throw new Error("Both question and answer are required")
+  }
+
+  const now = new Date().toISOString()
+  const entries = await readStoredMemoryEntries()
+  const existingById =
+    typeof input.id === "string"
+      ? entries.findIndex((entry) => entry.id === input.id)
+      : -1
+  const existingByQuestion = entries.findIndex(
+    (entry) => entry.question.toLowerCase() === question.toLowerCase()
+  )
+
+  if (existingById >= 0) {
+    const current = entries[existingById]
+    entries[existingById] = {
+      ...current,
+      question,
+      answer,
+      updatedAt: now
+    }
+  } else if (existingByQuestion >= 0) {
+    const current = entries[existingByQuestion]
+    entries[existingByQuestion] = {
+      ...current,
+      answer,
+      updatedAt: now
+    }
+  } else {
+    entries.push({
+      id: createMemoryId(),
+      question,
+      answer,
+      createdAt: now,
+      updatedAt: now
+    })
+  }
+
+  const normalized = entries
+    .sort(byUpdatedAtDesc)
+    .slice(0, AGENT_MEMORY_MAX_ENTRIES)
+
+  await writeStoredMemoryEntries(normalized)
+  return normalized
+}
+
+const deleteStoredMemoryEntry = async (id: string) => {
+  const trimmed = id.trim()
+
+  if (!trimmed) {
+    throw new Error("Memory id is required")
+  }
+
+  const entries = await readStoredMemoryEntries()
+  const nextEntries = entries.filter((entry) => entry.id !== trimmed)
+
+  await writeStoredMemoryEntries(nextEntries)
+  return nextEntries
+}
+
+const toPlannerMemory = (entries: AgentMemoryEntry[]): PlannerMemoryEntry[] => {
+  return entries.slice(0, AGENT_MEMORY_MAX_PLANNER_ITEMS).map((entry) => ({
+    id: entry.id,
+    question: entry.question.slice(0, AGENT_MEMORY_MAX_PLANNER_QUESTION_LENGTH),
+    answer: entry.answer.slice(0, AGENT_MEMORY_MAX_PLANNER_ANSWER_LENGTH),
+    updatedAt: entry.updatedAt
+  }))
+}
+
+const tokenizeForMemoryMatch = (value: string) => {
+  return value
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 2 && !MEMORY_MATCH_STOPWORDS.has(token))
+}
+
+const containsAliasGroup = (haystack: string, aliases: string[]) => {
+  return aliases.some((alias) => haystack.includes(alias))
+}
+
+const buildFieldDescriptor = (candidate: ElementCandidate) => {
+  return [
+    candidate.label,
+    candidate.placeholder,
+    candidate.questionText,
+    candidate.describedBy,
+    candidate.nameAttr,
+    candidate.idAttr,
+    candidate.autocomplete,
+    candidate.context,
+    candidate.inputType ?? "",
+    candidate.text
+  ]
+    .join(" ")
+    .toLowerCase()
+}
+
+const scoreMemoryQuestion = (question: string, descriptorBlob: string) => {
+  const questionLower = question.toLowerCase()
+  const descriptorTokens = new Set(tokenizeForMemoryMatch(descriptorBlob))
+  const questionTokens = tokenizeForMemoryMatch(questionLower)
+  let score = 0
+
+  for (const token of questionTokens) {
+    if (descriptorTokens.has(token)) {
+      score += 4
+    }
+  }
+
+  if (questionLower.length >= 8 && descriptorBlob.includes(questionLower)) {
+    score += 10
+  }
+
+  for (const group of MEMORY_ALIAS_GROUPS) {
+    if (
+      containsAliasGroup(questionLower, group) &&
+      containsAliasGroup(descriptorBlob, group)
+    ) {
+      score += 6
+    }
+  }
+
+  return score
+}
+
+const selectPlannerMemoryForSnapshot = (
+  entries: PlannerMemoryEntry[],
+  snapshot: PageSnapshot,
+  command: string
+) => {
+  if (entries.length === 0) {
+    return []
+  }
+
+  const editableDescriptors = snapshot.elements
+    .filter(
+      (candidate) =>
+        candidate.enabled &&
+        isEditableCandidate(candidate) &&
+        candidate.inputType !== "file"
+    )
+    .map((candidate) => buildFieldDescriptor(candidate))
+    .filter((descriptor) => descriptor.length > 0)
+
+  if (editableDescriptors.length === 0) {
+    return entries.slice(0, AGENT_MEMORY_MIN_RECENT_CONTEXT_ITEMS)
+  }
+
+  const descriptorBlob = `${command.toLowerCase()} ${editableDescriptors.join(" ")}`
+
+  const scoredEntries = entries
+    .map((entry) => ({
+      entry,
+      score: scoreMemoryQuestion(entry.question, descriptorBlob)
+    }))
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score
+      }
+
+      return right.entry.updatedAt.localeCompare(left.entry.updatedAt)
+    })
+
+  const selected: PlannerMemoryEntry[] = []
+  const selectedIds = new Set<string>()
+
+  for (const item of scoredEntries) {
+    if (item.score <= 0 || selected.length >= AGENT_MEMORY_MAX_PLANNER_ITEMS) {
+      continue
+    }
+
+    selected.push(item.entry)
+    selectedIds.add(item.entry.id)
+  }
+
+  for (const entry of entries) {
+    if (
+      selected.length >= AGENT_MEMORY_MAX_PLANNER_ITEMS ||
+      selected.length >= AGENT_MEMORY_MIN_RECENT_CONTEXT_ITEMS
+    ) {
+      break
+    }
+
+    if (selectedIds.has(entry.id)) {
+      continue
+    }
+
+    selected.push(entry)
+    selectedIds.add(entry.id)
+  }
+
+  return selected
 }
 
 const emitEvent = async (event: AgentEvent) => {
@@ -138,6 +494,13 @@ const collectSnapshotInPage = () => {
     placeholder: string
     href: string
     valuePreview: string
+    questionText: string
+    describedBy: string
+    nameAttr: string
+    idAttr: string
+    autocomplete: string
+    required: boolean
+    maxLength: number | null
     selector: string
     context: string
     visible: boolean
@@ -249,6 +612,127 @@ const collectSnapshotInPage = () => {
     return ""
   }
 
+  const uniqueJoin = (values: string[], maxLength = 240) => {
+    const output: string[] = []
+    const seen = new Set<string>()
+
+    for (const value of values) {
+      const normalizedValue = normalize(value)
+
+      if (!normalizedValue) {
+        continue
+      }
+
+      const key = normalizedValue.toLowerCase()
+
+      if (seen.has(key)) {
+        continue
+      }
+
+      seen.add(key)
+      output.push(normalizedValue)
+    }
+
+    return output.join(" | ").slice(0, maxLength)
+  }
+
+  const getTextByIdRefs = (refs: string | null) => {
+    if (!refs) {
+      return ""
+    }
+
+    const chunks = refs
+      .split(/\s+/)
+      .map((id) => id.trim())
+      .filter(Boolean)
+      .map((id) => document.getElementById(id)?.textContent ?? "")
+
+    return uniqueJoin(chunks)
+  }
+
+  const getPreviousPromptText = (element: HTMLElement) => {
+    const snippets: string[] = []
+    let sibling: Element | null = element.previousElementSibling
+    let hops = 0
+
+    while (sibling && hops < 5 && snippets.length < 2) {
+      const siblingText = normalize(
+        (sibling as HTMLElement).innerText || sibling.textContent || ""
+      )
+
+      if (siblingText.length >= 4 && siblingText.length <= 220) {
+        snippets.push(siblingText)
+      }
+
+      sibling = sibling.previousElementSibling
+      hops += 1
+    }
+
+    return uniqueJoin(snippets)
+  }
+
+  const getQuestionText = (element: Element) => {
+    const htmlElement = element as HTMLElement
+    const fromLabelledBy = getTextByIdRefs(
+      htmlElement.getAttribute("aria-labelledby")
+    )
+    const fromDescribedBy = getTextByIdRefs(
+      htmlElement.getAttribute("aria-describedby")
+    )
+    const fromFieldsetLegend = normalize(
+      element.closest("fieldset")?.querySelector("legend")?.textContent ?? ""
+    )
+    const fromWrappingLabel = normalize(
+      element.closest("label")?.textContent ?? ""
+    )
+    const fromPrevSibling = getPreviousPromptText(htmlElement)
+
+    return uniqueJoin(
+      [
+        getLabel(element),
+        fromLabelledBy,
+        fromFieldsetLegend,
+        fromWrappingLabel,
+        fromPrevSibling,
+        fromDescribedBy
+      ],
+      260
+    )
+  }
+
+  const getDescribedByText = (element: Element) => {
+    const htmlElement = element as HTMLElement
+    return getTextByIdRefs(htmlElement.getAttribute("aria-describedby"))
+  }
+
+  const getRequired = (element: Element) => {
+    const htmlElement = element as HTMLElement
+
+    if (
+      htmlElement instanceof HTMLInputElement ||
+      htmlElement instanceof HTMLTextAreaElement ||
+      htmlElement instanceof HTMLSelectElement
+    ) {
+      return (
+        htmlElement.required ||
+        htmlElement.getAttribute("aria-required") === "true"
+      )
+    }
+
+    return htmlElement.getAttribute("aria-required") === "true"
+  }
+
+  const getMaxLength = (element: Element): number | null => {
+    if (
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement
+    ) {
+      return element.maxLength > 0 ? element.maxLength : null
+    }
+
+    return null
+  }
+
   const query = [
     "button",
     "a[href]",
@@ -276,6 +760,9 @@ const collectSnapshotInPage = () => {
     const text = normalize(
       htmlElement.innerText || htmlElement.textContent || ""
     )
+    const label = getLabel(element)
+    const questionText = getQuestionText(element)
+    const describedBy = getDescribedByText(element)
     const placeholder = normalize(
       (htmlElement as HTMLInputElement | HTMLTextAreaElement).placeholder ?? ""
     )
@@ -292,10 +779,17 @@ const collectSnapshotInPage = () => {
           ? htmlElement.type || "text"
           : null,
       text,
-      label: getLabel(element),
+      label,
       placeholder,
       href: (htmlElement as HTMLAnchorElement).href ?? "",
       valuePreview,
+      questionText,
+      describedBy,
+      nameAttr: normalize(htmlElement.getAttribute("name") ?? ""),
+      idAttr: normalize(htmlElement.id ?? ""),
+      autocomplete: normalize(htmlElement.getAttribute("autocomplete") ?? ""),
+      required: getRequired(element),
+      maxLength: getMaxLength(element),
       selector: createSelector(element),
       context: nearestContext(element),
       visible: isVisible(element),
@@ -556,6 +1050,14 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
       element instanceof HTMLInputElement ||
       element instanceof HTMLTextAreaElement
     ) {
+      if (element instanceof HTMLInputElement && element.type === "file") {
+        return {
+          ok: false,
+          details:
+            "File input detected; browser security blocks automated file path typing"
+        }
+      }
+
       if (payload.clearFirst) {
         element.value = ""
       }
@@ -687,6 +1189,48 @@ const runElementAction = async (
   )
 }
 
+const inferCharacterLimit = (candidate: ElementCandidate): number | null => {
+  if (candidate.maxLength && candidate.maxLength > 0) {
+    return candidate.maxLength
+  }
+
+  const hintText =
+    `${candidate.questionText} ${candidate.describedBy} ${candidate.placeholder}`.toLowerCase()
+  const match = hintText.match(
+    /(\d{1,4})\s*(?:characters?|chars?)\s*(?:or less|max(?:imum)?|limit)?/
+  )
+
+  if (!match) {
+    return null
+  }
+
+  const value = Number(match[1])
+
+  if (!Number.isFinite(value) || value <= 0) {
+    return null
+  }
+
+  return value
+}
+
+const getTypeTextGuardError = (candidate: ElementCandidate, text: string) => {
+  if (candidate.inputType === "file") {
+    return "File upload input detected; attach files manually before continuing"
+  }
+
+  if (candidate.inputType === "checkbox" || candidate.inputType === "radio") {
+    return "Target is a checkbox/radio field and cannot accept free text"
+  }
+
+  const characterLimit = inferCharacterLimit(candidate)
+
+  if (characterLimit && text.length > characterLimit) {
+    return `Text length ${text.length} exceeds field limit ${characterLimit}`
+  }
+
+  return null
+}
+
 const executeAction = async (
   tabId: number,
   action: AgentAction,
@@ -772,6 +1316,17 @@ const executeAction = async (
     return { ok: false, details: `Element ${eid} not available in snapshot` }
   }
 
+  if (action.type === "type_text") {
+    const guardError = getTypeTextGuardError(candidate, action.text)
+
+    if (guardError) {
+      return {
+        ok: false,
+        details: guardError
+      }
+    }
+  }
+
   return runElementAction(tabId, candidate, action)
 }
 
@@ -803,10 +1358,112 @@ const inferFinishSuccess = (message: string) => {
   return !blockerPattern.test(lowered)
 }
 
+const isEditableCandidate = (candidate: ElementCandidate) => {
+  return (
+    candidate.tagName === "input" ||
+    candidate.tagName === "textarea" ||
+    candidate.tagName === "select" ||
+    candidate.role === "textbox" ||
+    candidate.inputType !== null
+  )
+}
+
+const shouldLoadPlannerMemory = (command: string, snapshot: PageSnapshot) => {
+  const commandLower = command.toLowerCase()
+
+  if (FORM_INTENT_PATTERN.test(commandLower)) {
+    return true
+  }
+
+  const editableCandidates = snapshot.elements.filter(
+    (candidate) =>
+      candidate.enabled &&
+      isEditableCandidate(candidate) &&
+      candidate.inputType !== "file"
+  )
+
+  if (editableCandidates.length === 0) {
+    return false
+  }
+
+  const hasKnownFieldHint = editableCandidates.some((candidate) => {
+    const descriptor = [
+      candidate.label,
+      candidate.placeholder,
+      candidate.questionText,
+      candidate.describedBy,
+      candidate.nameAttr,
+      candidate.idAttr,
+      candidate.text,
+      candidate.context,
+      candidate.inputType ?? ""
+    ]
+      .join(" ")
+      .toLowerCase()
+
+    return FORM_FIELD_HINT_PATTERN.test(descriptor)
+  })
+
+  if (hasKnownFieldHint) {
+    return true
+  }
+
+  const visibleText = snapshot.visibleTextPreview.join(" ").toLowerCase()
+
+  return /\b(sign up|register|application|checkout|billing|shipping|profile|account|contact)\b/.test(
+    visibleText
+  )
+}
+
+const getPlannerCandidateLimit = (command: string, snapshot: PageSnapshot) => {
+  if (shouldLoadPlannerMemory(command, snapshot)) {
+    return Math.max(AGENT_MAX_CANDIDATES, AGENT_FORM_MAX_CANDIDATES)
+  }
+
+  return AGENT_MAX_CANDIDATES
+}
+
+const getPlannerMemoryForStep = async (
+  session: RunSession,
+  snapshot: PageSnapshot
+) => {
+  if (!shouldLoadPlannerMemory(session.command, snapshot)) {
+    return undefined
+  }
+
+  if (!session.memoryLoaded) {
+    try {
+      const memoryEntries = await readStoredMemoryEntries()
+      session.memoryCache = toPlannerMemory(memoryEntries)
+    } catch {
+      session.memoryCache = []
+    }
+
+    session.memoryLoaded = true
+  }
+
+  if (session.memoryCache.length === 0) {
+    return undefined
+  }
+
+  const selectedMemory = selectPlannerMemoryForSnapshot(
+    session.memoryCache,
+    snapshot,
+    session.command
+  )
+
+  if (selectedMemory.length === 0) {
+    return undefined
+  }
+
+  return selectedMemory
+}
+
 const fetchPlan = async (
   command: string,
   snapshot: PageSnapshot,
-  history: AgentStepRecord[]
+  history: AgentStepRecord[],
+  memory?: PlannerMemoryEntry[]
 ) => {
   let lastError: Error | null = null
 
@@ -825,7 +1482,8 @@ const fetchPlan = async (
         body: JSON.stringify({
           command,
           snapshot,
-          history
+          history,
+          memory
         }),
         signal: controller.signal
       })
@@ -1034,7 +1692,9 @@ const createSession = async (startMessage: AgentStartMessage) => {
     startedAt: new Date().toISOString(),
     history: [],
     runLogSteps: [],
-    pendingConfirmation: null
+    pendingConfirmation: null,
+    memoryLoaded: false,
+    memoryCache: []
   }
 
   sessions.set(runId, session)
@@ -1058,10 +1718,14 @@ const runAgentLoop = async (session: RunSession) => {
   try {
     for (let step = 1; step <= AGENT_MAX_STEPS; step += 1) {
       const fullSnapshot = await readSnapshot(session.tabId)
+      const plannerCandidateLimit = getPlannerCandidateLimit(
+        session.command,
+        fullSnapshot
+      )
       const rankedElements = rankCandidates(
         fullSnapshot.elements,
         session.command,
-        AGENT_MAX_CANDIDATES
+        plannerCandidateLimit
       )
 
       const snapshotForPlanner: PageSnapshot = {
@@ -1069,10 +1733,16 @@ const runAgentLoop = async (session: RunSession) => {
         elements: rankedElements
       }
 
+      const plannerMemory = await getPlannerMemoryForStep(
+        session,
+        snapshotForPlanner
+      )
+
       const plan = await fetchPlan(
         session.command,
         snapshotForPlanner,
-        session.history
+        session.history,
+        plannerMemory
       )
 
       const runLogStep: AgentRunLogStep = {
@@ -1345,6 +2015,36 @@ chrome.runtime.onMessage.addListener(
     if (message.type === "agent/health") {
       fetchAgentHealth()
         .then((health) => sendResponse({ ok: true, health }))
+        .catch((error) =>
+          sendResponse({ ok: false, error: toErrorMessage(error) })
+        )
+
+      return true
+    }
+
+    if (message.type === "agent/memory/list") {
+      readStoredMemoryEntries()
+        .then((entries) => sendResponse({ ok: true, entries }))
+        .catch((error) =>
+          sendResponse({ ok: false, error: toErrorMessage(error) })
+        )
+
+      return true
+    }
+
+    if (message.type === "agent/memory/upsert") {
+      upsertStoredMemoryEntry(message.entry)
+        .then((entries) => sendResponse({ ok: true, entries }))
+        .catch((error) =>
+          sendResponse({ ok: false, error: toErrorMessage(error) })
+        )
+
+      return true
+    }
+
+    if (message.type === "agent/memory/delete") {
+      deleteStoredMemoryEntry(message.id)
+        .then((entries) => sendResponse({ ok: true, entries }))
         .catch((error) =>
           sendResponse({ ok: false, error: toErrorMessage(error) })
         )

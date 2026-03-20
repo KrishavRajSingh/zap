@@ -1,5 +1,6 @@
 import type {
   AgentAction,
+  AgentMemoryUpsertInput,
   AgentStepRecord,
   PageSnapshot
 } from "~lib/agent/types"
@@ -23,11 +24,28 @@ export type AgentHealthMessage = {
   type: "agent/health"
 }
 
+export type AgentMemoryListMessage = {
+  type: "agent/memory/list"
+}
+
+export type AgentMemoryUpsertMessage = {
+  type: "agent/memory/upsert"
+  entry: AgentMemoryUpsertInput
+}
+
+export type AgentMemoryDeleteMessage = {
+  type: "agent/memory/delete"
+  id: string
+}
+
 export type AgentRuntimeMessage =
   | AgentStartMessage
   | AgentConfirmMessage
   | AgentOpenPanelMessage
   | AgentHealthMessage
+  | AgentMemoryListMessage
+  | AgentMemoryUpsertMessage
+  | AgentMemoryDeleteMessage
 
 export type AgentEvent =
   | {
