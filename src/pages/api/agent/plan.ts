@@ -6,6 +6,7 @@ import type {
   PlannerMemoryEntry
 } from "~lib/agent/types"
 import { isObject } from "~lib/agent/validation"
+import { requireApiAuth } from "~lib/server/auth"
 import { requestPlanFromOpenRouter } from "~lib/server/openrouter"
 
 type RequestBody = {
@@ -51,6 +52,10 @@ export default async function handler(
   }
 
   try {
+    if (!(await requireApiAuth(req, res))) {
+      return
+    }
+
     const plan = await requestPlanFromOpenRouter(req.body)
     res.status(200).json(plan)
   } catch (error) {

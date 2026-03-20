@@ -1,4 +1,5 @@
 import type {
+  AgentAuthSession,
   AgentEvent,
   AgentRuntimeMessage,
   AgentStartMessage
@@ -37,6 +38,7 @@ type RunSession = {
 }
 
 const sessions = new Map<string, RunSession>()
+let authSessionCache: AgentAuthSession | null | undefined
 
 const AGENT_API_BASE =
   process.env.PLASMO_PUBLIC_AGENT_API_BASE ?? "http://localhost:1947"
@@ -52,6 +54,7 @@ const MAX_STAGNANT_CLICK_STEPS = 8
 const MAX_STAGNANT_INTERACTION_STEPS = 8
 const RUN_LOG_REQUEST_TIMEOUT_MS = 12000
 const AGENT_MEMORY_STORAGE_KEY = "agent_memory_v1"
+const AGENT_AUTH_STORAGE_KEY = "agent_auth_session_v1"
 const AGENT_MEMORY_MAX_ENTRIES = 160
 const AGENT_MEMORY_MAX_QUESTION_LENGTH = 220
 const AGENT_MEMORY_MAX_ANSWER_LENGTH = 1600
@@ -60,6 +63,7 @@ const AGENT_MEMORY_MAX_PLANNER_QUESTION_LENGTH = 180
 const AGENT_MEMORY_MAX_PLANNER_ANSWER_LENGTH = 520
 const AGENT_MEMORY_MIN_RECENT_CONTEXT_ITEMS = 8
 const AGENT_FORM_MAX_CANDIDATES = 140
+const AUTH_EXPIRY_SKEW_SECONDS = 30
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)))
@@ -70,6 +74,120 @@ const toErrorMessage = (error: unknown) => {
   }
 
   return "Unknown error"
+}
+
+const sanitizeAuthSession = (value: unknown): AgentAuthSession | null => {
+  if (!isObject(value)) {
+    return null
+  }
+
+  if (
+    typeof value.accessToken !== "string" ||
+    typeof value.userId !== "string"
+  ) {
+    return null
+  }
+
+  const accessToken = value.accessToken.trim()
+  const userId = value.userId.trim()
+
+  if (!accessToken || !userId) {
+    return null
+  }
+
+  const expiresAt =
+    typeof value.expiresAt === "number" && Number.isFinite(value.expiresAt)
+      ? value.expiresAt
+      : null
+  const email =
+    typeof value.email === "string" && value.email.trim().length > 0
+      ? value.email.trim()
+      : null
+
+  return {
+    accessToken,
+    expiresAt,
+    userId,
+    email
+  }
+}
+
+const readStoredAuthSession = async () => {
+  if (authSessionCache !== undefined) {
+    return authSessionCache
+  }
+
+  const stored = await chrome.storage.local.get(AGENT_AUTH_STORAGE_KEY)
+  const raw = stored[AGENT_AUTH_STORAGE_KEY]
+  const session = sanitizeAuthSession(raw)
+  authSessionCache = session
+  return session
+}
+
+const writeStoredAuthSession = async (session: AgentAuthSession | null) => {
+  authSessionCache = session
+
+  await chrome.storage.local.set({
+    [AGENT_AUTH_STORAGE_KEY]: session
+  })
+}
+
+const isAuthSessionExpired = (session: AgentAuthSession) => {
+  if (session.expiresAt === null) {
+    return false
+  }
+
+  return session.expiresAt <= Date.now() / 1000 + AUTH_EXPIRY_SKEW_SECONDS
+}
+
+const getActiveAuthSession = async () => {
+  const session = await readStoredAuthSession()
+
+  if (!session) {
+    throw new Error("Sign in required in the sidepanel before running Zap")
+  }
+
+  if (isAuthSessionExpired(session)) {
+    await writeStoredAuthSession(null)
+    throw new Error("Session expired. Sign in again to continue")
+  }
+
+  return session
+}
+
+const getAgentApiHeaders = async (includeContentType: boolean) => {
+  const session = await getActiveAuthSession()
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${session.accessToken}`
+  }
+
+  if (includeContentType) {
+    headers["Content-Type"] = "application/json"
+  }
+
+  return headers
+}
+
+const getOptionalAgentApiHeaders = async (includeContentType: boolean) => {
+  const headers: Record<string, string> = {}
+
+  if (includeContentType) {
+    headers["Content-Type"] = "application/json"
+  }
+
+  const session = await readStoredAuthSession()
+
+  if (!session) {
+    return headers
+  }
+
+  if (isAuthSessionExpired(session)) {
+    await writeStoredAuthSession(null)
+    return headers
+  }
+
+  headers.Authorization = `Bearer ${session.accessToken}`
+  return headers
 }
 
 const FORM_INTENT_PATTERN =
@@ -1474,11 +1592,10 @@ const fetchPlan = async (
     }, PLAN_REQUEST_TIMEOUT_MS)
 
     try {
+      const headers = await getAgentApiHeaders(true)
       const response = await fetch(`${AGENT_API_BASE}/api/agent/plan`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers,
         body: JSON.stringify({
           command,
           snapshot,
@@ -1490,6 +1607,11 @@ const fetchPlan = async (
 
       if (!response.ok) {
         const errorText = await response.text()
+
+        if (response.status === 401) {
+          await writeStoredAuthSession(null)
+        }
+
         const error = new Error(
           `Planning request failed: ${response.status} ${errorText}`
         )
@@ -1531,8 +1653,10 @@ const fetchPlan = async (
 }
 
 const fetchAgentHealth = async () => {
+  const headers = await getOptionalAgentApiHeaders(false)
   const response = await fetch(`${AGENT_API_BASE}/api/agent/health`, {
-    method: "GET"
+    method: "GET",
+    headers
   })
 
   if (!response.ok) {
@@ -1544,6 +1668,8 @@ const fetchAgentHealth = async () => {
     ok: boolean
     hasOpenRouterKey: boolean
     model: string
+    authRequired: boolean
+    hasSupabaseConfig: boolean
   }
 }
 
@@ -1593,17 +1719,21 @@ const persistRunLog = async (
   }
 
   try {
+    const headers = await getAgentApiHeaders(true)
     const response = await fetch(`${AGENT_API_BASE}/api/agent/log`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
+      headers,
       body: JSON.stringify(runLog),
       signal: controller.signal
     })
 
     if (!response.ok) {
       const errorText = await response.text()
+
+      if (response.status === 401) {
+        await writeStoredAuthSession(null)
+      }
+
       throw new Error(
         `Log save request failed: ${response.status} ${errorText}`
       )
@@ -1681,6 +1811,7 @@ const finalizeRunSession = async (
 const createSession = async (startMessage: AgentStartMessage) => {
   const tab = await getCurrentTab()
   assertAutomatableUrl(tab.url)
+  await getActiveAuthSession()
 
   const runId = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
 
@@ -2045,6 +2176,25 @@ chrome.runtime.onMessage.addListener(
     if (message.type === "agent/memory/delete") {
       deleteStoredMemoryEntry(message.id)
         .then((entries) => sendResponse({ ok: true, entries }))
+        .catch((error) =>
+          sendResponse({ ok: false, error: toErrorMessage(error) })
+        )
+
+      return true
+    }
+
+    if (message.type === "agent/auth/session") {
+      const nextSession = message.session
+        ? sanitizeAuthSession(message.session)
+        : null
+
+      if (message.session && !nextSession) {
+        sendResponse({ ok: false, error: "Invalid auth session payload" })
+        return false
+      }
+
+      writeStoredAuthSession(nextSession)
+        .then(() => sendResponse({ ok: true }))
         .catch((error) =>
           sendResponse({ ok: false, error: toErrorMessage(error) })
         )

@@ -38,6 +38,18 @@ export type AgentMemoryDeleteMessage = {
   id: string
 }
 
+export type AgentAuthSession = {
+  accessToken: string
+  expiresAt: number | null
+  userId: string
+  email: string | null
+}
+
+export type AgentAuthSessionMessage = {
+  type: "agent/auth/session"
+  session: AgentAuthSession | null
+}
+
 export type AgentRuntimeMessage =
   | AgentStartMessage
   | AgentConfirmMessage
@@ -46,6 +58,7 @@ export type AgentRuntimeMessage =
   | AgentMemoryListMessage
   | AgentMemoryUpsertMessage
   | AgentMemoryDeleteMessage
+  | AgentAuthSessionMessage
 
 export type AgentEvent =
   | {

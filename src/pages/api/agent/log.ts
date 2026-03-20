@@ -4,6 +4,7 @@ import type { NextApiRequest, NextApiResponse } from "next"
 
 import type { AgentRunLog } from "~lib/agent/types"
 import { isObject } from "~lib/agent/validation"
+import { requireApiAuth } from "~lib/server/auth"
 
 const LOG_ROOT_DIRECTORY = ".zap-logs"
 const SHOULD_PERSIST_RUN_LOGS =
@@ -64,6 +65,12 @@ export default async function handler(
   }
 
   try {
+    const authUser = await requireApiAuth(req, res)
+
+    if (!authUser) {
+      return
+    }
+
     const dayFolder = normalizeDayFolder(req.body.finishedAt)
     const directoryPath = join(process.cwd(), LOG_ROOT_DIRECTORY, dayFolder)
     const fileName = `${sanitizeSegment(req.body.runId)}.json`
@@ -75,6 +82,10 @@ export default async function handler(
       `${JSON.stringify(
         {
           ...req.body,
+          auth: {
+            userId: authUser.id,
+            email: authUser.email
+          },
           savedAt: new Date().toISOString(),
           schemaVersion: 1
         },

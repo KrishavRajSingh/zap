@@ -1,3 +1,4 @@
+import type { Session } from "@supabase/supabase-js"
 import { useEffect, useMemo, useState } from "react"
 
 import type {
@@ -6,6 +7,11 @@ import type {
   AgentRuntimeMessage
 } from "~lib/agent/messages"
 import type { AgentMemoryEntry } from "~lib/agent/types"
+import {
+  getSupabaseBrowserClient,
+  getSupabaseEmailRedirectUrl,
+  hasSupabaseBrowserEnv
+} from "~lib/client/supabase"
 
 const sendRuntimeMessage = async <T,>(message: AgentRuntimeMessage) => {
   return new Promise<T>((resolve, reject) => {
@@ -136,6 +142,8 @@ type HealthResponse =
         ok: boolean
         hasOpenRouterKey: boolean
         model: string
+        authRequired: boolean
+        hasSupabaseConfig: boolean
       }
     }
   | {
@@ -177,6 +185,13 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
   const [memoryAnswer, setMemoryAnswer] = useState("")
   const [memoryBusy, setMemoryBusy] = useState(false)
   const [memoryStatus, setMemoryStatus] = useState<string | null>(null)
+  const [authEmail, setAuthEmail] = useState("")
+  const [authPassword, setAuthPassword] = useState("")
+  const [authBusy, setAuthBusy] = useState(false)
+  const [authReady, setAuthReady] = useState(false)
+  const [authUserEmail, setAuthUserEmail] = useState<string | null>(null)
+  const [authStatus, setAuthStatus] = useState<string | null>(null)
+  const [authError, setAuthError] = useState<string | null>(null)
 
   useEffect(() => {
     const handler = (message: AgentEventEnvelope) => {
@@ -227,6 +242,218 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
       text: actionSummary(event)
     }))
   }, [events])
+
+  const syncAuthSessionToRuntime = async (session: Session | null) => {
+    const response = await sendRuntimeMessage<GenericResponse>({
+      type: "agent/auth/session",
+      session: session
+        ? {
+            accessToken: session.access_token,
+            expiresAt: session.expires_at ?? null,
+            userId: session.user.id,
+            email: session.user.email ?? null
+          }
+        : null
+    })
+
+    if (!response.ok) {
+      throw new Error(response.error ?? "Could not sync auth session")
+    }
+  }
+
+  useEffect(() => {
+    if (!hasSupabaseBrowserEnv) {
+      setAuthReady(true)
+      return
+    }
+
+    const supabase = getSupabaseBrowserClient()
+    let mounted = true
+
+    const bootstrap = async () => {
+      try {
+        const {
+          data: { session },
+          error: sessionError
+        } = await supabase.auth.getSession()
+
+        if (sessionError) {
+          throw sessionError
+        }
+
+        if (!mounted) {
+          return
+        }
+
+        setAuthUserEmail(session?.user.email ?? null)
+        await syncAuthSessionToRuntime(session)
+      } catch (cause) {
+        if (mounted) {
+          setAuthError(
+            cause instanceof Error
+              ? cause.message
+              : "Could not load auth session"
+          )
+        }
+      } finally {
+        if (mounted) {
+          setAuthReady(true)
+        }
+      }
+    }
+
+    const {
+      data: { subscription }
+    } = supabase.auth.onAuthStateChange((_, session) => {
+      setAuthUserEmail(session?.user.email ?? null)
+      setAuthError(null)
+      syncAuthSessionToRuntime(session).catch((cause) => {
+        if (!mounted) {
+          return
+        }
+
+        setAuthError(
+          cause instanceof Error ? cause.message : "Could not sync auth session"
+        )
+      })
+    })
+
+    bootstrap().catch(() => undefined)
+
+    return () => {
+      mounted = false
+      subscription.unsubscribe()
+    }
+  }, [])
+
+  const signIn = async () => {
+    if (!hasSupabaseBrowserEnv) {
+      setAuthError(
+        "Supabase is not configured. Set PLASMO_PUBLIC_SUPABASE_URL and PLASMO_PUBLIC_SUPABASE_ANON_KEY."
+      )
+      return
+    }
+
+    const email = authEmail.trim()
+    const password = authPassword.trim()
+
+    if (!email || !password) {
+      setAuthError("Email and password are required")
+      return
+    }
+
+    setAuthBusy(true)
+    setAuthStatus(null)
+    setAuthError(null)
+
+    try {
+      const supabase = getSupabaseBrowserClient()
+      const { data, error: signInError } =
+        await supabase.auth.signInWithPassword({
+          email,
+          password
+        })
+
+      if (signInError) {
+        throw signInError
+      }
+
+      await syncAuthSessionToRuntime(data.session)
+      setAuthUserEmail(data.user?.email ?? email)
+      setAuthPassword("")
+      setAuthStatus(`Signed in as ${data.user?.email ?? email}`)
+    } catch (cause) {
+      setAuthError(cause instanceof Error ? cause.message : "Could not sign in")
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  const signUp = async () => {
+    if (!hasSupabaseBrowserEnv) {
+      setAuthError(
+        "Supabase is not configured. Set PLASMO_PUBLIC_SUPABASE_URL and PLASMO_PUBLIC_SUPABASE_ANON_KEY."
+      )
+      return
+    }
+
+    const email = authEmail.trim()
+    const password = authPassword.trim()
+
+    if (!email || !password) {
+      setAuthError("Email and password are required")
+      return
+    }
+
+    setAuthBusy(true)
+    setAuthStatus(null)
+    setAuthError(null)
+
+    try {
+      const supabase = getSupabaseBrowserClient()
+      const { data, error: signUpError } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          emailRedirectTo: getSupabaseEmailRedirectUrl()
+        }
+      })
+
+      if (signUpError) {
+        throw signUpError
+      }
+
+      if (data.session && data.user) {
+        await syncAuthSessionToRuntime(data.session)
+        setAuthUserEmail(data.user.email ?? email)
+        setAuthPassword("")
+        setAuthStatus(
+          `Account ready and signed in as ${data.user.email ?? email}`
+        )
+      } else {
+        setAuthStatus("Check your email to confirm the account, then sign in")
+      }
+    } catch (cause) {
+      setAuthError(cause instanceof Error ? cause.message : "Could not sign up")
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  const signOut = async () => {
+    if (!hasSupabaseBrowserEnv) {
+      return
+    }
+
+    setAuthBusy(true)
+    setAuthStatus(null)
+    setAuthError(null)
+
+    try {
+      const supabase = getSupabaseBrowserClient()
+      const { error: signOutError } = await supabase.auth.signOut()
+
+      if (signOutError) {
+        throw signOutError
+      }
+
+      await syncAuthSessionToRuntime(null)
+      setAuthUserEmail(null)
+      setAuthPassword("")
+      setAuthStatus("Signed out")
+      setRunId(null)
+      setEvents([])
+      setPendingConfirmation(null)
+      setError(null)
+      setHealth(null)
+    } catch (cause) {
+      setAuthError(
+        cause instanceof Error ? cause.message : "Could not sign out"
+      )
+    } finally {
+      setAuthBusy(false)
+    }
+  }
 
   const loadMemoryEntries = async () => {
     setMemoryBusy(true)
@@ -318,13 +545,27 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
   }
 
   useEffect(() => {
+    if (!authUserEmail) {
+      return
+    }
+
     loadMemoryEntries().catch(() => undefined)
-  }, [])
+  }, [authUserEmail])
 
   const startRun = async () => {
     const trimmed = command.trim()
 
     if (!trimmed || busy) {
+      return
+    }
+
+    if (!authReady) {
+      setError("Auth session is still loading")
+      return
+    }
+
+    if (!authUserEmail) {
+      setError("Sign in required before running commands")
       return
     }
 
@@ -367,9 +608,24 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
         )
       }
 
-      const label = response.health.hasOpenRouterKey
-        ? `API OK - model: ${response.health.model}`
-        : "API reachable but OPENROUTER_API_KEY is missing"
+      const missingParts: string[] = []
+
+      if (!response.health.hasOpenRouterKey) {
+        missingParts.push("OPENROUTER_API_KEY")
+      }
+
+      if (!response.health.hasSupabaseConfig) {
+        missingParts.push(
+          "SUPABASE_URL/SUPABASE_ANON_KEY or PLASMO_PUBLIC_SUPABASE_*"
+        )
+      }
+
+      const label =
+        missingParts.length > 0
+          ? `API reachable but missing ${missingParts.join(" + ")}`
+          : response.health.authRequired && !authUserEmail
+            ? `API OK - sign in required - model: ${response.health.model}`
+            : `API OK - model: ${response.health.model}`
 
       setHealth(label)
     } catch (cause) {
@@ -405,6 +661,7 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
     : "min-h-screen min-w-[360px] p-[18px]"
   const buttonBaseClass =
     "rounded-lg border px-3 py-2 text-[12px] transition hover:-translate-y-px disabled:cursor-not-allowed disabled:opacity-45"
+  const isSignedIn = Boolean(authUserEmail)
 
   return (
     <div className={`${shellClass} flex flex-col gap-3 text-neutral-900`}>
@@ -414,190 +671,278 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
         </p>
         <h1 className="m-0 text-[21px] tracking-[-0.02em]">Zap Agent</h1>
         <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
-          Queue a command and watch each step execute in real time.
+          {isSignedIn
+            ? "Queue a command and watch each step execute in real time."
+            : "Sign in or create an account to start running commands."}
         </p>
       </header>
-
-      <div className="flex flex-col gap-2 rounded-xl border border-neutral-300 bg-white p-[10px]">
-        <label
-          className="text-[11px] uppercase tracking-[0.09em] text-neutral-500"
-          htmlFor="agent-command">
-          Command
-        </label>
-        <textarea
-          className="box-border w-full max-w-full resize-y rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
-          id="agent-command"
-          value={command}
-          onChange={(event) => setCommand(event.target.value)}
-          placeholder="Example: open github and create repo named zap"
-          rows={compact ? 3 : 4}
-        />
-
-        <div className="flex flex-wrap gap-2">
-          <button
-            className={`${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`}
-            disabled={busy || command.trim().length === 0}
-            onClick={startRun}>
-            {busy ? "Running..." : "Run Command"}
-          </button>
-          <button
-            className={`${buttonBaseClass} border-neutral-400 bg-neutral-50 text-neutral-900`}
-            disabled={busy}
-            onClick={checkHealth}>
-            Check Health
-          </button>
-        </div>
-      </div>
 
       <section className="flex flex-col gap-2 rounded-xl border border-neutral-300 bg-white p-[10px]">
         <div className="flex items-center justify-between gap-2">
           <p className="m-0 text-[11px] uppercase tracking-[0.09em] text-neutral-500">
-            Memory Vault
+            Account
           </p>
-          <button
-            className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 px-2 py-1 text-[11px] text-neutral-700`}
-            disabled={memoryBusy}
-            onClick={loadMemoryEntries}>
-            Refresh
-          </button>
+          <p className="m-0 rounded-full border border-neutral-300 bg-neutral-50 px-2 py-0.5 text-[10px] uppercase tracking-[0.08em] text-neutral-600">
+            {authUserEmail ? "Signed In" : "Signed Out"}
+          </p>
         </div>
 
-        <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
-          Save question-answer pairs once. Zap fetches them only when a step
-          looks form-like.
-        </p>
+        {!hasSupabaseBrowserEnv ? (
+          <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
+            Set PLASMO_PUBLIC_SUPABASE_URL and PLASMO_PUBLIC_SUPABASE_ANON_KEY,
+            then reload extension.
+          </p>
+        ) : authUserEmail ? (
+          <>
+            <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
+              Signed in as {authUserEmail}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 text-neutral-900`}
+                disabled={authBusy}
+                onClick={signOut}>
+                {authBusy ? "Working..." : "Sign Out"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <input
+              className="box-border w-full rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
+              onChange={(event) => setAuthEmail(event.target.value)}
+              placeholder="you@example.com"
+              type="email"
+              value={authEmail}
+            />
+            <input
+              className="box-border w-full rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
+              onChange={(event) => setAuthPassword(event.target.value)}
+              placeholder="Password"
+              type="password"
+              value={authPassword}
+            />
+            <div className="flex flex-wrap gap-2">
+              <button
+                className={`${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`}
+                disabled={authBusy || !authReady}
+                onClick={signIn}>
+                {authBusy ? "Working..." : "Sign In"}
+              </button>
+              <button
+                className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 text-neutral-900`}
+                disabled={authBusy || !authReady}
+                onClick={signUp}>
+                {authBusy ? "Working..." : "Sign Up"}
+              </button>
+            </div>
+          </>
+        )}
 
-        <input
-          className="box-border w-full rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
-          onChange={(event) => setMemoryQuestion(event.target.value)}
-          placeholder="Question or field label (for example: What is your email?)"
-          value={memoryQuestion}
-        />
-        <textarea
-          className="box-border w-full max-w-full resize-y rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
-          onChange={(event) => setMemoryAnswer(event.target.value)}
-          placeholder="Answer value"
-          rows={compact ? 2 : 3}
-          value={memoryAnswer}
-        />
-
-        <div className="flex flex-wrap gap-2">
-          <button
-            className={`${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`}
-            disabled={
-              memoryBusy ||
-              memoryQuestion.trim().length === 0 ||
-              memoryAnswer.trim().length === 0
-            }
-            onClick={saveMemoryEntry}>
-            {memoryBusy ? "Saving..." : "Save Pair"}
-          </button>
-        </div>
-
-        {memoryStatus ? (
+        {authStatus ? (
           <p className="m-0 rounded-[10px] border border-sky-300 bg-sky-50 px-[10px] py-2 text-[12px] text-sky-900">
-            {memoryStatus}
+            {authStatus}
           </p>
         ) : null}
 
-        <div className="flex max-h-[200px] flex-col gap-2 overflow-auto rounded-lg border border-neutral-200 bg-neutral-50 p-2">
-          {memoryEntries.length === 0 ? (
-            <p className="m-0 text-[12px] text-neutral-600">
-              No memory saved yet.
-            </p>
-          ) : (
-            memoryEntries.map((entry) => (
-              <article
-                className="rounded-lg border border-neutral-200 bg-white p-2"
-                key={entry.id}>
-                <p className="m-0 text-[11px] uppercase tracking-[0.08em] text-neutral-500">
-                  {entry.question}
-                </p>
-                <p className="m-0 mt-1 break-words text-[12px] leading-[1.45] text-neutral-800">
-                  {entry.answer}
-                </p>
-                <div className="mt-2 flex justify-end">
-                  <button
-                    className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 px-2 py-1 text-[11px] text-neutral-700`}
-                    disabled={memoryBusy}
-                    onClick={() => removeMemoryEntry(entry.id)}>
-                    Delete
-                  </button>
-                </div>
-              </article>
-            ))
-          )}
-        </div>
+        {authError ? (
+          <p className="m-0 rounded-[10px] border border-red-300 bg-red-50 px-[10px] py-2 text-[12px] text-red-800">
+            {authError}
+          </p>
+        ) : null}
       </section>
 
-      {error ? (
-        <div className="rounded-[10px] border border-red-300 bg-red-50 px-[10px] py-2 text-[12px] text-red-800">
-          {error}
-        </div>
-      ) : null}
-      {health ? (
-        <div className="rounded-[10px] border border-emerald-300 bg-emerald-50 px-[10px] py-2 text-[12px] text-emerald-900">
-          {health}
-        </div>
-      ) : null}
+      {isSignedIn ? (
+        <>
+          <div className="flex flex-col gap-2 rounded-xl border border-neutral-300 bg-white p-[10px]">
+            <label
+              className="text-[11px] uppercase tracking-[0.09em] text-neutral-500"
+              htmlFor="agent-command">
+              Command
+            </label>
+            <textarea
+              className="box-border w-full max-w-full resize-y rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
+              id="agent-command"
+              value={command}
+              onChange={(event) => setCommand(event.target.value)}
+              placeholder="Example: open github and create repo named zap"
+              rows={compact ? 3 : 4}
+            />
 
-      {pendingConfirmation?.type === "confirmation_required" ? (
-        <section className="flex flex-col gap-2 rounded-xl border border-neutral-800 bg-neutral-100 p-[10px]">
-          <p className="m-0 text-[12px] uppercase tracking-[0.08em]">
-            Confirmation required
-          </p>
-          <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
-            {pendingConfirmation.reason}
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <button
-              className={`${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`}
-              onClick={() => resolveConfirmation(true)}>
-              Approve
-            </button>
-            <button
-              className={`${buttonBaseClass} border-neutral-400 bg-neutral-50 text-neutral-900`}
-              onClick={() => resolveConfirmation(false)}>
-              Reject
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className={`${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`}
+                disabled={
+                  busy ||
+                  !authReady ||
+                  !authUserEmail ||
+                  command.trim().length === 0
+                }
+                onClick={startRun}>
+                {busy ? "Running..." : "Run Command"}
+              </button>
+              <button
+                className={`${buttonBaseClass} border-neutral-400 bg-neutral-50 text-neutral-900`}
+                disabled={busy}
+                onClick={checkHealth}>
+                Check Health
+              </button>
+            </div>
           </div>
-        </section>
+
+          <section className="flex flex-col gap-2 rounded-xl border border-neutral-300 bg-white p-[10px]">
+            <div className="flex items-center justify-between gap-2">
+              <p className="m-0 text-[11px] uppercase tracking-[0.09em] text-neutral-500">
+                Memory Vault
+              </p>
+              <button
+                className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 px-2 py-1 text-[11px] text-neutral-700`}
+                disabled={memoryBusy}
+                onClick={loadMemoryEntries}>
+                Refresh
+              </button>
+            </div>
+
+            <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
+              Save question-answer pairs once. Zap fetches them only when a step
+              looks form-like.
+            </p>
+
+            <input
+              className="box-border w-full rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
+              onChange={(event) => setMemoryQuestion(event.target.value)}
+              placeholder="Question or field label (for example: What is your email?)"
+              value={memoryQuestion}
+            />
+            <textarea
+              className="box-border w-full max-w-full resize-y rounded-lg border border-neutral-300 bg-neutral-100 p-[10px] text-[12px] text-neutral-900 outline-none focus:border-neutral-500 focus:outline focus:outline-2 focus:outline-offset-1 focus:outline-neutral-800"
+              onChange={(event) => setMemoryAnswer(event.target.value)}
+              placeholder="Answer value"
+              rows={compact ? 2 : 3}
+              value={memoryAnswer}
+            />
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                className={`${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`}
+                disabled={
+                  memoryBusy ||
+                  memoryQuestion.trim().length === 0 ||
+                  memoryAnswer.trim().length === 0
+                }
+                onClick={saveMemoryEntry}>
+                {memoryBusy ? "Saving..." : "Save Pair"}
+              </button>
+            </div>
+
+            {memoryStatus ? (
+              <p className="m-0 rounded-[10px] border border-sky-300 bg-sky-50 px-[10px] py-2 text-[12px] text-sky-900">
+                {memoryStatus}
+              </p>
+            ) : null}
+
+            <div className="flex max-h-[200px] flex-col gap-2 overflow-auto rounded-lg border border-neutral-200 bg-neutral-50 p-2">
+              {memoryEntries.length === 0 ? (
+                <p className="m-0 text-[12px] text-neutral-600">
+                  No memory saved yet.
+                </p>
+              ) : (
+                memoryEntries.map((entry) => (
+                  <article
+                    className="rounded-lg border border-neutral-200 bg-white p-2"
+                    key={entry.id}>
+                    <p className="m-0 text-[11px] uppercase tracking-[0.08em] text-neutral-500">
+                      {entry.question}
+                    </p>
+                    <p className="m-0 mt-1 break-words text-[12px] leading-[1.45] text-neutral-800">
+                      {entry.answer}
+                    </p>
+                    <div className="mt-2 flex justify-end">
+                      <button
+                        className={`${buttonBaseClass} border-neutral-300 bg-neutral-50 px-2 py-1 text-[11px] text-neutral-700`}
+                        disabled={memoryBusy}
+                        onClick={() => removeMemoryEntry(entry.id)}>
+                        Delete
+                      </button>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
+          </section>
+
+          {error ? (
+            <div className="rounded-[10px] border border-red-300 bg-red-50 px-[10px] py-2 text-[12px] text-red-800">
+              {error}
+            </div>
+          ) : null}
+          {health ? (
+            <div className="rounded-[10px] border border-emerald-300 bg-emerald-50 px-[10px] py-2 text-[12px] text-emerald-900">
+              {health}
+            </div>
+          ) : null}
+
+          {pendingConfirmation?.type === "confirmation_required" ? (
+            <section className="flex flex-col gap-2 rounded-xl border border-neutral-800 bg-neutral-100 p-[10px]">
+              <p className="m-0 text-[12px] uppercase tracking-[0.08em]">
+                Confirmation required
+              </p>
+              <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
+                {pendingConfirmation.reason}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  className={`${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`}
+                  onClick={() => resolveConfirmation(true)}>
+                  Approve
+                </button>
+                <button
+                  className={`${buttonBaseClass} border-neutral-400 bg-neutral-50 text-neutral-900`}
+                  onClick={() => resolveConfirmation(false)}>
+                  Reject
+                </button>
+              </div>
+            </section>
+          ) : null}
+
+          <section className="overflow-hidden rounded-xl border border-neutral-300 bg-white">
+            <div className="flex items-center justify-between border-b border-neutral-300 bg-neutral-50 px-[10px] py-[9px]">
+              <p className="m-0 text-[11px] uppercase tracking-[0.09em] text-neutral-500">
+                Execution Log
+              </p>
+              <p className="m-0 text-[11px] uppercase tracking-[0.09em] text-neutral-500">
+                {logs.length} events
+              </p>
+            </div>
+
+            <div className="flex max-h-[320px] flex-col gap-[7px] overflow-auto p-2 max-[720px]:max-h-[240px]">
+              {logs.length === 0 ? (
+                <p className="m-0 text-[12px] text-neutral-600">
+                  No run logs yet.
+                </p>
+              ) : (
+                logs.map((log, index) => {
+                  const event = events[index]
+
+                  return (
+                    <div
+                      className="grid grid-cols-[auto_1fr] items-start gap-2 rounded-lg border border-neutral-200 bg-neutral-50 p-[7px]"
+                      key={log.key}>
+                      <span
+                        className={`inline-flex min-w-[50px] items-center justify-center rounded-full border px-[6px] py-[2px] text-[10px] uppercase tracking-[0.08em] ${eventTone(event)}`}>
+                        {eventLabel(event)}
+                      </span>
+                      <p className="m-0 text-[12px] leading-[1.45] text-neutral-900">
+                        {log.text}
+                      </p>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          </section>
+        </>
       ) : null}
-
-      <section className="overflow-hidden rounded-xl border border-neutral-300 bg-white">
-        <div className="flex items-center justify-between border-b border-neutral-300 bg-neutral-50 px-[10px] py-[9px]">
-          <p className="m-0 text-[11px] uppercase tracking-[0.09em] text-neutral-500">
-            Execution Log
-          </p>
-          <p className="m-0 text-[11px] uppercase tracking-[0.09em] text-neutral-500">
-            {logs.length} events
-          </p>
-        </div>
-
-        <div className="flex max-h-[320px] flex-col gap-[7px] overflow-auto p-2 max-[720px]:max-h-[240px]">
-          {logs.length === 0 ? (
-            <p className="m-0 text-[12px] text-neutral-600">No run logs yet.</p>
-          ) : (
-            logs.map((log, index) => {
-              const event = events[index]
-
-              return (
-                <div
-                  className="grid grid-cols-[auto_1fr] items-start gap-2 rounded-lg border border-neutral-200 bg-neutral-50 p-[7px]"
-                  key={log.key}>
-                  <span
-                    className={`inline-flex min-w-[50px] items-center justify-center rounded-full border px-[6px] py-[2px] text-[10px] uppercase tracking-[0.08em] ${eventTone(event)}`}>
-                    {eventLabel(event)}
-                  </span>
-                  <p className="m-0 text-[12px] leading-[1.45] text-neutral-900">
-                    {log.text}
-                  </p>
-                </div>
-              )
-            })
-          )}
-        </div>
-      </section>
     </div>
   )
 }
