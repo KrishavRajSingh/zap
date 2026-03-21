@@ -1,3 +1,7 @@
+import Image from "next/image"
+
+import zapIcon from "../../assets/icon.png"
+
 const capabilities = [
   "Open URL",
   "Click + type",
@@ -82,17 +86,47 @@ function IndexPage() {
   return (
     <main className="min-h-screen px-4 pb-10 pt-5 text-neutral-900 sm:px-8">
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
-        <header className="animate-rise flex items-center justify-between rounded-xl border border-neutral-300/90 bg-white/85 p-3 backdrop-blur-sm">
-          <p className="m-0 text-xs uppercase tracking-[0.13em] text-neutral-600">
-            Zap
-          </p>
-          <a
-            className="rounded-md border border-neutral-300 bg-white px-2.5 py-1 text-[11px] uppercase tracking-[0.1em] text-neutral-700 transition hover:-translate-y-px"
-            href="/api/agent/health"
-            rel="noreferrer"
-            target="_blank">
-            API Health
-          </a>
+        <header className="animate-rise flex flex-wrap items-center justify-between gap-2 rounded-xl border border-neutral-300/90 bg-white/85 p-3 backdrop-blur-sm">
+          <div className="flex items-center gap-2.5">
+            <Image
+              alt="Zap icon"
+              className="h-10 w-10"
+              height={40}
+              priority
+              src={zapIcon}
+              width={40}
+            />
+            <p className="m-0 text-xs uppercase tracking-[0.13em] text-neutral-600">
+              Zap
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <a
+              className="inline-flex items-center gap-1.5 rounded-md border border-neutral-300 bg-white px-3 py-1.5 text-[11px] uppercase tracking-[0.1em] text-neutral-700 transition hover:-translate-y-px"
+              href="https://github.com/KrishavRajSingh/zap"
+              rel="noreferrer"
+              target="_blank">
+              <svg
+                aria-hidden="true"
+                className="h-3.5 w-3.5"
+                viewBox="0 0 16 16"
+                xmlns="http://www.w3.org/2000/svg">
+                <path
+                  d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49C3.78 14.09 3.31 12.73 3.31 12.73c-.36-.92-.88-1.17-.88-1.17-.72-.49.05-.48.05-.48.79.06 1.21.82 1.21.82.71 1.2 1.86.85 2.31.65.07-.51.28-.85.5-1.04-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.58.82-2.14-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.53 7.53 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.14 0 3.07-1.87 3.75-3.66 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.19 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
+                  fill="currentColor"
+                />
+              </svg>
+              GitHub
+            </a>
+            <a
+              className="rounded-md border border-neutral-900 bg-neutral-900 px-3 py-1.5 text-[11px] uppercase tracking-[0.1em] text-neutral-50 transition hover:-translate-y-px"
+              href="https://chromewebstore.google.com"
+              rel="noreferrer"
+              target="_blank">
+              Install Now
+            </a>
+          </div>
         </header>
 
         <section className="animate-rise [animation-delay:70ms] [animation-fill-mode:both] rounded-2xl border border-neutral-300 bg-white p-4 shadow-[0_24px_60px_-44px_rgba(0,0,0,0.9)] sm:p-6">
