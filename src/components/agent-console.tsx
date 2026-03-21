@@ -886,14 +886,6 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
 
   useEffect(() => {
     refreshHealthIndicator(true).catch(() => undefined)
-
-    const intervalId = setInterval(() => {
-      refreshHealthIndicator().catch(() => undefined)
-    }, 45000)
-
-    return () => {
-      clearInterval(intervalId)
-    }
   }, [refreshHealthIndicator])
 
   const resolveConfirmation = async (approve: boolean) => {
