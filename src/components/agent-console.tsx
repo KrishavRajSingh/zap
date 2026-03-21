@@ -860,8 +860,8 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
         <h1 className="m-0 text-[21px] tracking-[-0.02em]">Zap Agent</h1>
         <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
           {isSignedIn
-            ? "Queue a command and watch each step execute in real time."
-            : "Sign in with Google or email to start running commands."}
+            ? "Describe a task and Zap executes it step by step in your tab."
+            : "Sign in to run browser tasks with Zap."}
         </p>
 
         {isSignedIn ? (

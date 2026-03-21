@@ -2,7 +2,7 @@
   "name": "zap",
   "displayName": "Zap",
   "version": "0.0.1",
-  "description": "Agentic browser automation extension with Plasmo + Next.js",
+  "description": "Automate web tasks from plain English with live step logs and approval before sensitive actions.",
   "author": "Krishav",
   "contributors": [
     "louisgv"
