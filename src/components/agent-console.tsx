@@ -212,6 +212,7 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
   const [command, setCommand] = useState("")
   const [runId, setRunId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [stopBusy, setStopBusy] = useState(false)
   const [events, setEvents] = useState<AgentEvent[]>([])
   const [error, setError] = useState<string | null>(null)
   const [health, setHealth] = useState<string | null>(null)
@@ -254,6 +255,7 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
 
       if (event.type === "run_finished") {
         setBusy(false)
+        setStopBusy(false)
         setPendingConfirmation(null)
 
         if (!event.success) {
@@ -262,6 +264,8 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
       }
 
       if (event.type === "run_error") {
+        setBusy(false)
+        setStopBusy(false)
         setError(event.message)
       }
 
@@ -627,6 +631,7 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
       setMemoryStatus(null)
       setError(null)
       setHealth(null)
+      setStopBusy(false)
     } catch (cause) {
       setAuthError(
         cause instanceof Error ? cause.message : "Could not sign out"
@@ -758,6 +763,7 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
     setEvents([])
     setPendingConfirmation(null)
     setBusy(true)
+    setStopBusy(false)
 
     try {
       const response = await sendRuntimeMessage<StartResponse>({
@@ -774,7 +780,31 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
       setRunId(response.runId)
     } catch (cause) {
       setBusy(false)
+      setStopBusy(false)
       setError(cause instanceof Error ? cause.message : "Failed to start run")
+    }
+  }
+
+  const stopRun = async () => {
+    if (!busy || !runId || stopBusy) {
+      return
+    }
+
+    setError(null)
+    setStopBusy(true)
+
+    try {
+      const response = await sendRuntimeMessage<GenericResponse>({
+        type: "agent/stop",
+        runId
+      })
+
+      if (!response.ok) {
+        throw new Error(response.error ?? "Could not stop run")
+      }
+    } catch (cause) {
+      setStopBusy(false)
+      setError(cause instanceof Error ? cause.message : "Could not stop run")
     }
   }
 
@@ -999,6 +1029,12 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
                 }
                 onClick={startRun}>
                 {busy ? "Running..." : "Run Command"}
+              </button>
+              <button
+                className={`${buttonBaseClass} border-red-300 bg-red-50 text-red-800`}
+                disabled={!busy || !runId || stopBusy}
+                onClick={stopRun}>
+                {stopBusy ? "Stopping..." : "Stop Run"}
               </button>
               <button
                 className={`${buttonBaseClass} border-neutral-400 bg-neutral-50 text-neutral-900`}

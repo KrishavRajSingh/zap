@@ -10,6 +10,11 @@ export type AgentStartMessage = {
   command: string
 }
 
+export type AgentStopMessage = {
+  type: "agent/stop"
+  runId: string
+}
+
 export type AgentConfirmMessage = {
   type: "agent/confirm"
   runId: string
@@ -52,6 +57,7 @@ export type AgentAuthSessionMessage = {
 
 export type AgentRuntimeMessage =
   | AgentStartMessage
+  | AgentStopMessage
   | AgentConfirmMessage
   | AgentOpenPanelMessage
   | AgentHealthMessage

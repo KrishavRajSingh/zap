@@ -24,6 +24,11 @@ type PendingConfirmation = {
   resolve: (approved: boolean) => void
 }
 
+type PendingStopWait = {
+  timeoutId: ReturnType<typeof setTimeout>
+  reject: (error: Error) => void
+}
+
 type RunSession = {
   runId: string
   command: string
@@ -33,6 +38,9 @@ type RunSession = {
   history: AgentStepRecord[]
   runLogSteps: AgentRunLogStep[]
   pendingConfirmation: PendingConfirmation | null
+  pendingWait: PendingStopWait | null
+  activePlanController: AbortController | null
+  stopRequested: boolean
   memoryLoaded: boolean
   memoryCache: PlannerMemoryEntry[]
 }
@@ -64,6 +72,7 @@ const AGENT_MEMORY_MAX_PLANNER_ANSWER_LENGTH = 520
 const AGENT_MEMORY_MIN_RECENT_CONTEXT_ITEMS = 8
 const AGENT_FORM_MAX_CANDIDATES = 140
 const AUTH_EXPIRY_SKEW_SECONDS = 30
+const STOPPED_BY_USER_MESSAGE = "Stopped by user"
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms)))
@@ -74,6 +83,25 @@ const toErrorMessage = (error: unknown) => {
   }
 
   return "Unknown error"
+}
+
+class RunStoppedError extends Error {
+  constructor() {
+    super(STOPPED_BY_USER_MESSAGE)
+    this.name = "RunStoppedError"
+  }
+}
+
+const createRunStoppedError = () => new RunStoppedError()
+
+const isRunStoppedError = (error: unknown) => {
+  return error instanceof RunStoppedError
+}
+
+const assertRunNotStopped = (session: RunSession) => {
+  if (session.stopRequested) {
+    throw createRunStoppedError()
+  }
 }
 
 const sanitizeAuthSession = (value: unknown): AgentAuthSession | null => {
@@ -1349,19 +1377,55 @@ const getTypeTextGuardError = (candidate: ElementCandidate, text: string) => {
   return null
 }
 
+const waitForInterruptibleDelay = (session: RunSession, ms: number) => {
+  return new Promise<void>((resolve, reject) => {
+    const timeoutId = setTimeout(
+      () => {
+        if (session.pendingWait?.timeoutId === timeoutId) {
+          session.pendingWait = null
+        }
+
+        resolve()
+      },
+      Math.max(0, ms)
+    )
+
+    session.pendingWait = {
+      timeoutId,
+      reject: (error) => {
+        if (session.pendingWait?.timeoutId === timeoutId) {
+          clearTimeout(timeoutId)
+          session.pendingWait = null
+          reject(error)
+        }
+      }
+    }
+
+    if (session.stopRequested) {
+      session.pendingWait.reject(createRunStoppedError())
+    }
+  })
+}
+
 const executeAction = async (
-  tabId: number,
+  session: RunSession,
   action: AgentAction,
   candidates: ElementCandidate[]
 ) => {
+  const tabId = session.tabId
+
+  assertRunNotStopped(session)
+
   if (action.type === "open_url") {
     await chrome.tabs.update(tabId, { url: action.url })
     await waitForTabComplete(tabId)
+    assertRunNotStopped(session)
     return { ok: true, details: `Opened ${action.url}` }
   }
 
   if (action.type === "wait") {
-    await new Promise((resolve) => setTimeout(resolve, Math.max(0, action.ms)))
+    await waitForInterruptibleDelay(session, action.ms)
+    assertRunNotStopped(session)
     return { ok: true, details: `Waited ${action.ms}ms` }
   }
 
@@ -1578,7 +1642,7 @@ const getPlannerMemoryForStep = async (
 }
 
 const fetchPlan = async (
-  command: string,
+  session: RunSession,
   snapshot: PageSnapshot,
   history: AgentStepRecord[],
   memory?: PlannerMemoryEntry[]
@@ -1586,7 +1650,10 @@ const fetchPlan = async (
   let lastError: Error | null = null
 
   for (let attempt = 1; attempt <= PLAN_MAX_ATTEMPTS; attempt += 1) {
+    assertRunNotStopped(session)
+
     const controller = new AbortController()
+    session.activePlanController = controller
     const timeout = setTimeout(() => {
       controller.abort()
     }, PLAN_REQUEST_TIMEOUT_MS)
@@ -1597,7 +1664,7 @@ const fetchPlan = async (
         method: "POST",
         headers,
         body: JSON.stringify({
-          command,
+          command: session.command,
           snapshot,
           history,
           memory
@@ -1631,6 +1698,10 @@ const fetchPlan = async (
 
       return (await response.json()) as AgentPlan
     } catch (error) {
+      if (session.stopRequested) {
+        throw createRunStoppedError()
+      }
+
       lastError =
         error instanceof Error ? error : new Error(toErrorMessage(error))
 
@@ -1641,6 +1712,10 @@ const fetchPlan = async (
 
       throw lastError
     } finally {
+      if (session.activePlanController === controller) {
+        session.activePlanController = null
+      }
+
       clearTimeout(timeout)
     }
   }
@@ -1673,7 +1748,24 @@ const fetchAgentHealth = async () => {
   }
 }
 
+const stopSessionExecution = (session: RunSession) => {
+  session.stopRequested = true
+  session.activePlanController?.abort()
+  session.activePlanController = null
+
+  if (session.pendingWait) {
+    session.pendingWait.reject(createRunStoppedError())
+  }
+
+  if (session.pendingConfirmation) {
+    session.pendingConfirmation.resolve(false)
+    session.pendingConfirmation = null
+  }
+}
+
 const waitForConfirmation = (session: RunSession) => {
+  assertRunNotStopped(session)
+
   return new Promise<boolean>((resolve) => {
     session.pendingConfirmation = {
       resolve
@@ -1826,6 +1918,9 @@ const createSession = async (startMessage: AgentStartMessage) => {
     history: [],
     runLogSteps: [],
     pendingConfirmation: null,
+    pendingWait: null,
+    activePlanController: null,
+    stopRequested: false,
     memoryLoaded: false,
     memoryCache: []
   }
@@ -1850,7 +1945,11 @@ const runAgentLoop = async (session: RunSession) => {
 
   try {
     for (let step = 1; step <= AGENT_MAX_STEPS; step += 1) {
+      assertRunNotStopped(session)
+
       const fullSnapshot = await readSnapshot(session.tabId)
+      assertRunNotStopped(session)
+
       const plannerCandidateLimit = getPlannerCandidateLimit(
         session.command,
         fullSnapshot
@@ -1870,13 +1969,15 @@ const runAgentLoop = async (session: RunSession) => {
         session,
         snapshotForPlanner
       )
+      assertRunNotStopped(session)
 
       const plan = await fetchPlan(
-        session.command,
+        session,
         snapshotForPlanner,
         session.history,
         plannerMemory
       )
+      assertRunNotStopped(session)
 
       const runLogStep: AgentRunLogStep = {
         step,
@@ -1964,6 +2065,8 @@ const runAgentLoop = async (session: RunSession) => {
         runLogStep.confirmation.approved = approved
         runLogStep.confirmation.resolvedAt = new Date().toISOString()
 
+        assertRunNotStopped(session)
+
         if (!approved) {
           await finalizeRunSession(session, {
             success: false,
@@ -1974,10 +2077,11 @@ const runAgentLoop = async (session: RunSession) => {
       }
 
       const execution = await executeAction(
-        session.tabId,
+        session,
         plan.action,
         fullSnapshot.elements
       )
+      assertRunNotStopped(session)
 
       runLogStep.execution = {
         result: execution.ok ? "success" : "error",
@@ -2070,6 +2174,14 @@ const runAgentLoop = async (session: RunSession) => {
     })
     return
   } catch (error) {
+    if (isRunStoppedError(error)) {
+      await finalizeRunSession(session, {
+        success: false,
+        message: STOPPED_BY_USER_MESSAGE
+      })
+      return
+    }
+
     const message = toErrorMessage(error)
 
     await finalizeRunSession(
@@ -2122,6 +2234,22 @@ chrome.runtime.onMessage.addListener(
       return true
     }
 
+    if (message.type === "agent/stop") {
+      const session = sessions.get(message.runId)
+
+      if (!session) {
+        sendResponse({ ok: true })
+        return false
+      }
+
+      if (!session.stopRequested) {
+        stopSessionExecution(session)
+      }
+
+      sendResponse({ ok: true })
+      return false
+    }
+
     if (message.type === "agent/confirm") {
       const session = sessions.get(message.runId)
 
@@ -2131,6 +2259,7 @@ chrome.runtime.onMessage.addListener(
       }
 
       session.pendingConfirmation.resolve(message.approve)
+      session.pendingConfirmation = null
       sendResponse({ ok: true })
       return false
     }
