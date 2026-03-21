@@ -103,6 +103,11 @@ function IndexPage() {
 
           <div className="flex flex-wrap items-center gap-2">
             <a
+              className="rounded-md border border-neutral-300 bg-white px-3 py-1.5 text-[11px] uppercase tracking-[0.1em] text-neutral-700 transition hover:-translate-y-px"
+              href="/privacy">
+              Privacy
+            </a>
+            <a
               className="inline-flex items-center gap-1.5 rounded-md border border-neutral-300 bg-white px-3 py-1.5 text-[11px] uppercase tracking-[0.1em] text-neutral-700 transition hover:-translate-y-px"
               href="https://github.com/KrishavRajSingh/zap"
               rel="noreferrer"
