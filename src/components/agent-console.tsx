@@ -1,5 +1,5 @@
 import type { Session } from "@supabase/supabase-js"
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 
 import type {
   AgentEvent,
@@ -188,6 +188,12 @@ type HealthResponse =
       error: string
     }
 
+type HealthIndicator = {
+  tone: "checking" | "ok" | "warn" | "error"
+  label: string
+  hint: string
+}
+
 type MemoryListResponse =
   | {
       ok: true
@@ -215,7 +221,11 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
   const [stopBusy, setStopBusy] = useState(false)
   const [events, setEvents] = useState<AgentEvent[]>([])
   const [error, setError] = useState<string | null>(null)
-  const [health, setHealth] = useState<string | null>(null)
+  const [healthIndicator, setHealthIndicator] = useState<HealthIndicator>({
+    tone: "checking",
+    label: "API...",
+    hint: "Checking API health"
+  })
   const [pendingConfirmation, setPendingConfirmation] =
     useState<AgentEvent | null>(null)
   const [memoryEntries, setMemoryEntries] = useState<AgentMemoryEntry[]>([])
@@ -630,7 +640,6 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
       setMemoryExpanded(false)
       setMemoryStatus(null)
       setError(null)
-      setHealth(null)
       setStopBusy(false)
     } catch (cause) {
       setAuthError(
@@ -759,7 +768,6 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
     }
 
     setError(null)
-    setHealth(null)
     setEvents([])
     setPendingConfirmation(null)
     setBusy(true)
@@ -808,45 +816,85 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
     }
   }
 
-  const checkHealth = async () => {
-    setError(null)
-
-    try {
-      const response = await sendRuntimeMessage<HealthResponse>({
-        type: "agent/health"
-      })
-
-      if (!response.ok) {
-        throw new Error(
-          "error" in response ? response.error : "Health check failed"
-        )
+  const refreshHealthIndicator = useCallback(
+    async (showChecking = false) => {
+      if (showChecking) {
+        setHealthIndicator({
+          tone: "checking",
+          label: "API...",
+          hint: "Checking API health"
+        })
       }
 
-      const missingParts: string[] = []
+      try {
+        const response = await sendRuntimeMessage<HealthResponse>({
+          type: "agent/health"
+        })
 
-      if (!response.health.hasOpenRouterKey) {
-        missingParts.push("OPENROUTER_API_KEY")
+        if (!response.ok) {
+          throw new Error(
+            "error" in response ? response.error : "Health check failed"
+          )
+        }
+
+        const missingParts: string[] = []
+
+        if (!response.health.hasOpenRouterKey) {
+          missingParts.push("OPENROUTER_API_KEY")
+        }
+
+        if (!response.health.hasSupabaseConfig) {
+          missingParts.push(
+            "SUPABASE_URL/SUPABASE_ANON_KEY or PLASMO_PUBLIC_SUPABASE_*"
+          )
+        }
+
+        if (missingParts.length > 0) {
+          setHealthIndicator({
+            tone: "warn",
+            label: "API setup",
+            hint: `Missing ${missingParts.join(" + ")}`
+          })
+          return
+        }
+
+        if (response.health.authRequired && !authUserEmail) {
+          setHealthIndicator({
+            tone: "warn",
+            label: "API sign-in",
+            hint: `API reachable with ${response.health.model}; sign in required`
+          })
+          return
+        }
+
+        setHealthIndicator({
+          tone: "ok",
+          label: "API ok",
+          hint: `Model: ${response.health.model}`
+        })
+      } catch (cause) {
+        setHealthIndicator({
+          tone: "error",
+          label: "API down",
+          hint:
+            cause instanceof Error ? cause.message : "API health check failed"
+        })
       }
+    },
+    [authUserEmail]
+  )
 
-      if (!response.health.hasSupabaseConfig) {
-        missingParts.push(
-          "SUPABASE_URL/SUPABASE_ANON_KEY or PLASMO_PUBLIC_SUPABASE_*"
-        )
-      }
+  useEffect(() => {
+    refreshHealthIndicator(true).catch(() => undefined)
 
-      const label =
-        missingParts.length > 0
-          ? `API reachable but missing ${missingParts.join(" + ")}`
-          : response.health.authRequired && !authUserEmail
-            ? `API OK - sign in required - model: ${response.health.model}`
-            : `API OK - model: ${response.health.model}`
+    const intervalId = setInterval(() => {
+      refreshHealthIndicator().catch(() => undefined)
+    }, 45000)
 
-      setHealth(label)
-    } catch (cause) {
-      setHealth(null)
-      setError(cause instanceof Error ? cause.message : "Health check failed")
+    return () => {
+      clearInterval(intervalId)
     }
-  }
+  }, [refreshHealthIndicator])
 
   const resolveConfirmation = async (approve: boolean) => {
     if (!runId) {
@@ -876,6 +924,27 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
   const buttonBaseClass =
     "rounded-lg border px-3 py-2 text-[12px] transition hover:-translate-y-px disabled:cursor-not-allowed disabled:opacity-45"
   const isSignedIn = Boolean(authUserEmail)
+  const runDisabled =
+    !authReady || !authUserEmail || command.trim().length === 0
+  const primaryActionLabel = busy
+    ? stopBusy
+      ? "Stopping..."
+      : runId
+        ? "Stop"
+        : "Starting..."
+    : "Run"
+  const primaryActionDisabled = busy ? stopBusy || !runId : runDisabled
+  const primaryActionClass = busy
+    ? `${buttonBaseClass} border-red-300 bg-red-50 text-red-800`
+    : `${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`
+  const healthIndicatorClass =
+    healthIndicator.tone === "ok"
+      ? "border-emerald-300 bg-emerald-50 text-emerald-900"
+      : healthIndicator.tone === "warn"
+        ? "border-amber-300 bg-amber-50 text-amber-900"
+        : healthIndicator.tone === "error"
+          ? "border-red-300 bg-red-50 text-red-800"
+          : "border-neutral-300 bg-neutral-100 text-neutral-700"
   const googleAuthAvailable =
     typeof chrome !== "undefined" &&
     typeof chrome.identity?.launchWebAuthFlow === "function" &&
@@ -884,9 +953,20 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
   return (
     <div className={`${shellClass} flex flex-col gap-3 text-neutral-900`}>
       <header className="flex flex-col gap-1">
-        <p className="m-0 text-[11px] uppercase tracking-[0.1em] text-neutral-500">
-          Automation Console
-        </p>
+        <div className="flex items-center justify-between gap-2">
+          <p className="m-0 text-[11px] uppercase tracking-[0.1em] text-neutral-500">
+            Automation Console
+          </p>
+          <button
+            className={`rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.08em] transition hover:-translate-y-px disabled:cursor-not-allowed disabled:opacity-45 ${healthIndicatorClass}`}
+            onClick={() => {
+              refreshHealthIndicator(true).catch(() => undefined)
+            }}
+            title={healthIndicator.hint}
+            type="button">
+            {healthIndicator.label}
+          </button>
+        </div>
         <h1 className="m-0 text-[21px] tracking-[-0.02em]">Zap Agent</h1>
         <p className="m-0 text-[12px] leading-[1.45] text-neutral-600">
           {isSignedIn
@@ -1018,29 +1098,12 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
               rows={compact ? 3 : 4}
             />
 
-            <div className="flex flex-wrap gap-2">
+            <div className="flex">
               <button
-                className={`${buttonBaseClass} border-neutral-900 bg-neutral-900 text-neutral-50`}
-                disabled={
-                  busy ||
-                  !authReady ||
-                  !authUserEmail ||
-                  command.trim().length === 0
-                }
-                onClick={startRun}>
-                {busy ? "Running..." : "Run Command"}
-              </button>
-              <button
-                className={`${buttonBaseClass} border-red-300 bg-red-50 text-red-800`}
-                disabled={!busy || !runId || stopBusy}
-                onClick={stopRun}>
-                {stopBusy ? "Stopping..." : "Stop Run"}
-              </button>
-              <button
-                className={`${buttonBaseClass} border-neutral-400 bg-neutral-50 text-neutral-900`}
-                disabled={busy}
-                onClick={checkHealth}>
-                Check Health
+                className={`${primaryActionClass} min-w-[92px]`}
+                disabled={primaryActionDisabled}
+                onClick={busy ? stopRun : startRun}>
+                {primaryActionLabel}
               </button>
             </div>
           </div>
@@ -1149,11 +1212,6 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
           {error ? (
             <div className="rounded-[10px] border border-red-300 bg-red-50 px-[10px] py-2 text-[12px] text-red-800">
               {error}
-            </div>
-          ) : null}
-          {health ? (
-            <div className="rounded-[10px] border border-emerald-300 bg-emerald-50 px-[10px] py-2 text-[12px] text-emerald-900">
-              {health}
             </div>
           ) : null}
 
