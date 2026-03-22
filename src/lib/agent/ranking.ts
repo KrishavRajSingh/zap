@@ -32,12 +32,18 @@ export const rankCandidates = (
       candidate.describedBy,
       candidate.nameAttr,
       candidate.idAttr,
+      candidate.forAttr,
       candidate.autocomplete,
       candidate.href,
       candidate.context,
       candidate.tagName,
       candidate.inputType ?? "",
-      candidate.role ?? ""
+      candidate.role ?? "",
+      candidate.checked === true
+        ? "checked selected true yes"
+        : candidate.checked === false
+          ? "unchecked unselected false no"
+          : ""
     ]
       .join(" ")
       .toLowerCase()
@@ -52,6 +58,15 @@ export const rankCandidates = (
       candidate.tagName === "select" ||
       candidate.role === "textbox" ||
       candidate.inputType !== null
+    const isChoiceControl =
+      candidate.inputType === "checkbox" ||
+      candidate.inputType === "radio" ||
+      candidate.role === "checkbox" ||
+      candidate.role === "radio"
+    const isLabelOption =
+      candidate.tagName === "label" &&
+      candidate.forAttr.length > 0 &&
+      /\b(yes|no|true|false)\b/.test(candidate.text.toLowerCase())
 
     let score = 0
 
@@ -95,6 +110,10 @@ export const rankCandidates = (
 
     if (formIntent && isEditable) {
       score += 2
+    }
+
+    if (formIntent && (isChoiceControl || isLabelOption)) {
+      score += 3
     }
 
     if (candidate.required && isEditable) {

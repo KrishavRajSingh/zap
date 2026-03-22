@@ -454,9 +454,15 @@ const buildFieldDescriptor = (candidate: ElementCandidate) => {
     candidate.describedBy,
     candidate.nameAttr,
     candidate.idAttr,
+    candidate.forAttr,
     candidate.autocomplete,
     candidate.context,
     candidate.inputType ?? "",
+    candidate.checked === true
+      ? "checked selected true yes"
+      : candidate.checked === false
+        ? "unchecked unselected false no"
+        : "",
     candidate.text
   ]
     .join(" ")
@@ -635,6 +641,7 @@ const collectSnapshotInPage = () => {
     tagName: string
     role: string | null
     inputType: string | null
+    forAttr: string
     text: string
     label: string
     placeholder: string
@@ -646,6 +653,7 @@ const collectSnapshotInPage = () => {
     idAttr: string
     autocomplete: string
     required: boolean
+    checked: boolean | null
     maxLength: number | null
     selector: string
     context: string
@@ -699,6 +707,10 @@ const collectSnapshotInPage = () => {
     const name = element.getAttribute("name")
     const tag = element.tagName.toLowerCase()
 
+    if (element instanceof HTMLLabelElement && element.htmlFor) {
+      return `label[for="${element.htmlFor.replace(/"/g, '\\"')}"]`
+    }
+
     if (name) {
       return `${tag}[name="${name.replace(/"/g, '\\"')}"]`
     }
@@ -742,6 +754,10 @@ const collectSnapshotInPage = () => {
     const aria = htmlElement.getAttribute("aria-label")
     if (aria) {
       return normalize(aria)
+    }
+
+    if (htmlElement instanceof HTMLLabelElement) {
+      return normalize(htmlElement.textContent ?? "")
     }
 
     if (
@@ -817,6 +833,61 @@ const collectSnapshotInPage = () => {
     return uniqueJoin(snippets)
   }
 
+  const getNearbyPromptText = (element: HTMLElement) => {
+    const snippets: string[] = []
+    const selfText = normalize(element.innerText || element.textContent || "")
+    let current: Element | null = element
+    let hops = 0
+
+    while (current && hops < 6 && snippets.length < 4) {
+      const parent = current.parentElement
+
+      if (!parent) {
+        break
+      }
+
+      for (const sibling of Array.from(parent.children)) {
+        if (sibling === current) {
+          continue
+        }
+
+        const tagName = sibling.tagName.toLowerCase()
+
+        if (
+          tagName !== "label" &&
+          tagName !== "legend" &&
+          tagName !== "p" &&
+          tagName !== "span" &&
+          tagName !== "h1" &&
+          tagName !== "h2" &&
+          tagName !== "h3" &&
+          tagName !== "h4"
+        ) {
+          continue
+        }
+
+        const siblingText = normalize(
+          (sibling as HTMLElement).innerText || sibling.textContent || ""
+        )
+
+        if (siblingText.length < 4 || siblingText.length > 260) {
+          continue
+        }
+
+        if (selfText && siblingText.toLowerCase() === selfText.toLowerCase()) {
+          continue
+        }
+
+        snippets.push(siblingText)
+      }
+
+      current = parent
+      hops += 1
+    }
+
+    return uniqueJoin(snippets, 260)
+  }
+
   const getQuestionText = (element: Element) => {
     const htmlElement = element as HTMLElement
     const fromLabelledBy = getTextByIdRefs(
@@ -832,6 +903,7 @@ const collectSnapshotInPage = () => {
       element.closest("label")?.textContent ?? ""
     )
     const fromPrevSibling = getPreviousPromptText(htmlElement)
+    const fromNearbyPrompt = getNearbyPromptText(htmlElement)
 
     return uniqueJoin(
       [
@@ -840,6 +912,7 @@ const collectSnapshotInPage = () => {
         fromFieldsetLegend,
         fromWrappingLabel,
         fromPrevSibling,
+        fromNearbyPrompt,
         fromDescribedBy
       ],
       260
@@ -868,6 +941,63 @@ const collectSnapshotInPage = () => {
     return htmlElement.getAttribute("aria-required") === "true"
   }
 
+  const getForAttr = (element: Element) => {
+    if (element instanceof HTMLLabelElement) {
+      return normalize(element.htmlFor)
+    }
+
+    return normalize((element as HTMLElement).getAttribute("for") ?? "")
+  }
+
+  const getCheckedState = (element: Element): boolean | null => {
+    if (element instanceof HTMLInputElement) {
+      if (element.type === "checkbox" || element.type === "radio") {
+        return element.checked
+      }
+
+      return null
+    }
+
+    const htmlElement = element as HTMLElement
+
+    if (htmlElement instanceof HTMLLabelElement && htmlElement.htmlFor) {
+      const controlledElement = document.getElementById(htmlElement.htmlFor)
+
+      if (
+        controlledElement instanceof HTMLInputElement &&
+        (controlledElement.type === "checkbox" ||
+          controlledElement.type === "radio")
+      ) {
+        return controlledElement.checked
+      }
+
+      if (controlledElement instanceof HTMLElement) {
+        const controlledAriaChecked =
+          controlledElement.getAttribute("aria-checked")
+
+        if (controlledAriaChecked === "true") {
+          return true
+        }
+
+        if (controlledAriaChecked === "false") {
+          return false
+        }
+      }
+    }
+
+    const ariaChecked = htmlElement.getAttribute("aria-checked")
+
+    if (ariaChecked === "true") {
+      return true
+    }
+
+    if (ariaChecked === "false") {
+      return false
+    }
+
+    return null
+  }
+
   const getMaxLength = (element: Element): number | null => {
     if (
       element instanceof HTMLInputElement ||
@@ -885,8 +1015,12 @@ const collectSnapshotInPage = () => {
     "input:not([type='hidden'])",
     "textarea",
     "select",
+    "label[for]",
     "[role='button']",
     "[role='link']",
+    "[role='checkbox']",
+    "[role='radio']",
+    "[aria-checked]",
     "[contenteditable='true']"
   ].join(",")
 
@@ -924,6 +1058,7 @@ const collectSnapshotInPage = () => {
         htmlElement instanceof HTMLInputElement
           ? htmlElement.type || "text"
           : null,
+      forAttr: getForAttr(element),
       text,
       label,
       placeholder,
@@ -935,6 +1070,7 @@ const collectSnapshotInPage = () => {
       idAttr: normalize(htmlElement.id ?? ""),
       autocomplete: normalize(htmlElement.getAttribute("autocomplete") ?? ""),
       required: getRequired(element),
+      checked: getCheckedState(element),
       maxLength: getMaxLength(element),
       selector: createSelector(element),
       context: nearestContext(element),
@@ -1023,6 +1159,132 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
       style.visibility !== "hidden" &&
       style.display !== "none"
     )
+  }
+
+  const toCssAttributeValue = (value: string) => {
+    if (window.CSS?.escape) {
+      return window.CSS.escape(value)
+    }
+
+    return value.replace(/(["\\])/g, "\\$1")
+  }
+
+  const hasClickableAncestorHint = (element: HTMLElement) => {
+    if (
+      typeof element.onclick === "function" ||
+      element.hasAttribute("onclick")
+    ) {
+      return true
+    }
+
+    const role = element.getAttribute("role")
+
+    if (role === "button" || role === "checkbox" || role === "radio") {
+      return true
+    }
+
+    const tagName = element.tagName.toLowerCase()
+
+    if (tagName === "button" || tagName === "a" || tagName === "label") {
+      return true
+    }
+
+    return (
+      typeof element.className === "string" &&
+      element.className.toLowerCase().includes("cursor-pointer")
+    )
+  }
+
+  const findVisibleClickableAncestor = (start: HTMLElement) => {
+    let current: HTMLElement | null = start
+    let hops = 0
+
+    while (current && hops < 6) {
+      const parent = current.parentElement
+
+      if (!parent) {
+        return null
+      }
+
+      if (hasClickableAncestorHint(parent) && isVisibleElement(parent)) {
+        return parent
+      }
+
+      current = parent
+      hops += 1
+    }
+
+    return null
+  }
+
+  const resolveVisibleClickTarget = (
+    element: HTMLElement
+  ): HTMLElement | null => {
+    if (isVisibleElement(element)) {
+      return element
+    }
+
+    if (
+      element instanceof HTMLInputElement &&
+      (element.type === "checkbox" || element.type === "radio")
+    ) {
+      const labels = element.labels ? Array.from(element.labels) : []
+
+      for (const label of labels) {
+        if (isVisibleElement(label)) {
+          return label
+        }
+      }
+
+      if (element.id) {
+        const labelByFor = document.querySelector(
+          `label[for="${toCssAttributeValue(element.id)}"]`
+        )
+
+        if (labelByFor instanceof HTMLElement && isVisibleElement(labelByFor)) {
+          return labelByFor
+        }
+      }
+    }
+
+    if (element instanceof HTMLLabelElement && element.htmlFor) {
+      const controlledElement = document.getElementById(element.htmlFor)
+
+      if (
+        controlledElement instanceof HTMLElement &&
+        isVisibleElement(controlledElement)
+      ) {
+        return controlledElement
+      }
+
+      const controlAncestor = controlledElement?.closest(
+        "[role='radio'], [role='checkbox'], [role='button'], button, a[href], label"
+      )
+
+      if (
+        controlAncestor instanceof HTMLElement &&
+        isVisibleElement(controlAncestor)
+      ) {
+        return controlAncestor
+      }
+    }
+
+    const wrappingLabel = element.closest("label")
+
+    if (
+      wrappingLabel instanceof HTMLElement &&
+      isVisibleElement(wrappingLabel)
+    ) {
+      return wrappingLabel
+    }
+
+    const clickableAncestor = findVisibleClickableAncestor(element)
+
+    if (clickableAncestor) {
+      return clickableAncestor
+    }
+
+    return null
   }
 
   const resolveElement = (target: DomTarget) => {
@@ -1145,20 +1407,33 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
       return { ok: false, details: "Target element not found" }
     }
 
-    const requiresVisibleTarget =
-      payload.kind === "click" || payload.kind === "type_text"
+    if (payload.kind === "click") {
+      const clickTarget = resolveVisibleClickTarget(element)
 
-    if (requiresVisibleTarget && !isVisibleElement(element)) {
+      if (!clickTarget) {
+        return {
+          ok: false,
+          details: "Target element is not visible or interactable"
+        }
+      }
+
+      clickTarget.scrollIntoView({ block: "center", inline: "center" })
+      clickTarget.click()
+
+      return {
+        ok: true,
+        details:
+          clickTarget === element
+            ? "Clicked target element"
+            : "Clicked associated visible target element"
+      }
+    }
+
+    if (payload.kind === "type_text" && !isVisibleElement(element)) {
       return {
         ok: false,
         details: "Target element is not visible or interactable"
       }
-    }
-
-    if (payload.kind === "click") {
-      element.scrollIntoView({ block: "center", inline: "center" })
-      element.click()
-      return { ok: true, details: "Clicked target element" }
     }
 
     if (payload.kind === "extract_text") {
@@ -1546,6 +1821,9 @@ const isEditableCandidate = (candidate: ElementCandidate) => {
     candidate.tagName === "textarea" ||
     candidate.tagName === "select" ||
     candidate.role === "textbox" ||
+    candidate.role === "checkbox" ||
+    candidate.role === "radio" ||
+    (candidate.tagName === "label" && candidate.forAttr.length > 0) ||
     candidate.inputType !== null
   )
 }
@@ -1576,9 +1854,15 @@ const shouldLoadPlannerMemory = (command: string, snapshot: PageSnapshot) => {
       candidate.describedBy,
       candidate.nameAttr,
       candidate.idAttr,
+      candidate.forAttr,
       candidate.text,
       candidate.context,
-      candidate.inputType ?? ""
+      candidate.inputType ?? "",
+      candidate.checked === true
+        ? "checked selected true yes"
+        : candidate.checked === false
+          ? "unchecked unselected false no"
+          : ""
     ]
       .join(" ")
       .toLowerCase()

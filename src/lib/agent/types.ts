@@ -10,6 +10,7 @@ export type ElementCandidate = {
   tagName: string
   role: string | null
   inputType: string | null
+  forAttr: string
   text: string
   label: string
   placeholder: string
@@ -21,6 +22,7 @@ export type ElementCandidate = {
   idAttr: string
   autocomplete: string
   required: boolean
+  checked: boolean | null
   maxLength: number | null
   selector: string
   context: string

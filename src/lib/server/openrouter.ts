@@ -37,10 +37,12 @@ Rules:
 10) Optional memory entries may be included as { id, question, answer, updatedAt }.
 11) When memory exists, semantically map form labels/placeholders/questions to the best matching memory.question and use memory.answer in type_text.
 12) Never invent personal profile data (name, email, phone, address, DOB, IDs, payment, passwords, OTP). If a required value is missing from memory and the page state, use finish with success=false.
-13) For each form field, use questionText/label/placeholder/describedBy/nameAttr/idAttr/context to choose the correct eid; avoid writing long prose into short-summary fields.
-14) Respect maxLength and character-limit hints (for example "50 characters or less"). If memory text is too long for a field, choose finish with success=false and explain the mismatch.
-15) Do not attempt to type into file inputs. File uploads require manual user action; if a required file is missing, choose finish with success=false and explain.
-16) Prefer filling required fields before optional ones.
+13) For each form field, use questionText/label/placeholder/describedBy/nameAttr/idAttr/forAttr/context to choose the correct eid; avoid writing long prose into short-summary fields.
+14) For checkbox/radio/yes-no fields, use click actions (never type_text). You may click either the control eid or a label-option eid that represents the same choice.
+15) Use checked when available for checkbox/radio fields; avoid clicking an option that is already selected unless you must change it.
+16) Respect maxLength and character-limit hints (for example "50 characters or less"). If memory text is too long for a field, choose finish with success=false and explain the mismatch.
+17) Do not attempt to type into file inputs. File uploads require manual user action; if a required file is missing, choose finish with success=false and explain.
+18) Prefer filling required fields before optional ones.
 
 Allowed action schema:
 {
