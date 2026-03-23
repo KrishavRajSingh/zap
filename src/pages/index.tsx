@@ -126,7 +126,7 @@ function IndexPage() {
             </a>
             <a
               className="rounded-md border border-neutral-900 bg-neutral-900 px-3 py-1.5 text-[11px] uppercase tracking-[0.1em] text-neutral-50 transition hover:-translate-y-px"
-              href="https://chromewebstore.google.com"
+              href="https://chromewebstore.google.com/detail/zap/jdbccmcjdindpjekfmkiphkjeddamnmf"
               rel="noreferrer"
               target="_blank">
               Install Now
