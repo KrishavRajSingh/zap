@@ -5,8 +5,51 @@ export type Rect = {
   height: number
 }
 
+export type PageIframe = {
+  src: string
+  title: string
+  nameAttr: string
+  idAttr: string
+  visible: boolean
+  inViewport: boolean
+  contentDocumentAccessible: boolean
+  rect: Rect
+}
+
+export type PageFrameCapture = {
+  strategy: "main_document_only" | "all_frames"
+  capturedFrameCount: number
+  capturedSubframeCount: number
+  discoveredIframeCount: number
+  visibleIframeCount: number
+  inViewportIframeCount: number
+  accessibleIframeCount: number
+  likelyMissedIframeContent: boolean
+}
+
+export type ElementControlKind =
+  | "text"
+  | "native_select"
+  | "custom_select"
+  | "select_option"
+  | "radio"
+  | "checkbox"
+  | "button"
+  | "link"
+  | "other"
+
+export type ElementPopupState = "closed" | "open" | "unknown"
+
+export type ElementOptionSource = "aria_role" | "generic_popup" | null
+
 export type ElementCandidate = {
   eid: string
+  frameId: number
+  frameUrl: string
+  frameTitle: string
+  controlKind: ElementControlKind
+  popupState: ElementPopupState
+  optionSource: ElementOptionSource
   tagName: string
   role: string | null
   inputType: string | null
@@ -25,6 +68,9 @@ export type ElementCandidate = {
   checked: boolean | null
   maxLength: number | null
   selector: string
+  interactionSelector: string
+  ownerControlSelector: string
+  popupContainerSelector: string
   context: string
   visible: boolean
   enabled: boolean
@@ -40,6 +86,8 @@ export type PageSnapshot = {
     width: number
     height: number
   }
+  frameCapture: PageFrameCapture
+  iframes: PageIframe[]
   visibleTextPreview: string[]
   elements: ElementCandidate[]
 }
@@ -63,6 +111,145 @@ export type PlannerMemoryEntry = {
   question: string
   answer: string
   updatedAt: string
+}
+
+export type PlannerTraceRequestMeta = {
+  runId: string
+  step: number
+  attempt: number
+}
+
+export type PlannerSnapshotTopCandidate = {
+  eid: string
+  frameId: number
+  frameUrl: string
+  frameTitle: string
+  controlKind: ElementControlKind
+  popupState: ElementPopupState
+  optionSource: ElementOptionSource
+  tagName: string
+  role: string | null
+  inputType: string | null
+  text: string
+  label: string
+  questionText: string
+  context: string
+  selector: string
+  visible: boolean
+  enabled: boolean
+  inViewport: boolean
+}
+
+export type PlannerSnapshotSummary = {
+  url: string
+  title: string
+  timestamp: string
+  totalCandidates: number
+  visibleCandidates: number
+  enabledCandidates: number
+  inViewportCandidates: number
+  editableCandidates: number
+  linkCandidates: number
+  frameCapture: PageFrameCapture
+  iframePreview: PageIframe[]
+  visibleTextPreview: string[]
+  topCandidates: PlannerSnapshotTopCandidate[]
+}
+
+export type PlannerTraceReference = {
+  tracePath: string
+  snapshotSummary: PlannerSnapshotSummary
+}
+
+export type AgentExecutionCandidateSummary = {
+  eid: string
+  frameId: number
+  frameUrl: string
+  controlKind: ElementControlKind
+  popupState: ElementPopupState
+  optionSource: ElementOptionSource
+  label: string
+  questionText: string
+  selector: string
+  interactionSelector: string
+  ownerControlSelector: string
+  popupContainerSelector: string
+}
+
+export type AgentExecutionNodeSummary = {
+  selector: string
+  tagName: string
+  idAttr: string
+  className: string
+  role: string | null
+  text: string
+  title: string
+  ariaLabel: string
+  valuePreview: string
+  visible: boolean
+  rect: Rect
+}
+
+export type AgentExecutionPopupSummary = {
+  popupState: ElementPopupState
+  relatedOptionCount: number
+  optionLabels: string[]
+}
+
+export type AgentExecutionSnapshotSummary = {
+  url: string
+  title: string
+  timestamp: string
+  totalCandidates: number
+  visibleCandidates: number
+  inViewportCandidates: number
+  visibleTextPreview: string[]
+  relatedOptions?: AgentExecutionPopupSummary
+  target?: {
+    popupState: ElementPopupState
+    valuePreview: string
+    visible: boolean
+    inViewport: boolean
+  }
+}
+
+export type AgentExecutionTrace = {
+  actionType: AgentAction["type"]
+  requestedCandidate?: AgentExecutionCandidateSummary
+  resolvedElement?: AgentExecutionNodeSummary
+  interactionElement?: AgentExecutionNodeSummary
+  clickTarget?: AgentExecutionNodeSummary
+  activeElementBefore?: AgentExecutionNodeSummary
+  activeElementAfter?: AgentExecutionNodeSummary
+  resolutionStrategy: string[]
+  beforeUrl?: string
+  afterUrl?: string
+  topLevelUrlChanged?: boolean
+  popupBefore?: AgentExecutionPopupSummary
+  popupAfter?: AgentExecutionPopupSummary
+  afterSnapshot?: AgentExecutionSnapshotSummary
+}
+
+export type AgentExecutionTraceSummary = {
+  resolution: string
+  clickedSelector: string
+  clickedText: string
+  afterUrl: string
+  popupAfterState: ElementPopupState
+  relatedOptionCount: number
+  optionLabels: string[]
+}
+
+export type AgentExecutionTraceReference = {
+  tracePath: string
+  summary: AgentExecutionTraceSummary
+}
+
+export type AgentStepExecution = {
+  result: "success" | "error"
+  details: string
+  executedAt: string
+  trace?: AgentExecutionTrace | AgentExecutionTraceReference
 }
 
 export type AgentAction =
@@ -126,17 +313,14 @@ export type AgentRunLogStep = {
   }
   rationale: string
   action: AgentAction
+  planner?: PlannerTraceReference
   confirmation?: {
     required: boolean
     reason: string
     approved: boolean | null
     resolvedAt?: string
   }
-  execution?: {
-    result: "success" | "error"
-    details: string
-    executedAt: string
-  }
+  execution?: AgentStepExecution
 }
 
 export type AgentRunLog = {
@@ -152,5 +336,5 @@ export type AgentRunLog = {
   steps: AgentRunLogStep[]
 }
 
-export const AGENT_MAX_STEPS = 16
+export const AGENT_MAX_STEPS = 50
 export const AGENT_MAX_CANDIDATES = 70

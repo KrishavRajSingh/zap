@@ -6,7 +6,14 @@ import type {
   AgentEventEnvelope,
   AgentRuntimeMessage
 } from "~lib/agent/messages"
-import type { AgentMemoryEntry } from "~lib/agent/types"
+import type {
+  AgentExecutionPopupSummary,
+  AgentExecutionTrace,
+  AgentExecutionTraceReference,
+  AgentMemoryEntry,
+  AgentStepExecution,
+  ElementCandidate
+} from "~lib/agent/types"
 import {
   getSupabaseBrowserClient,
   getSupabaseEmailRedirectUrl,
@@ -155,6 +162,217 @@ const eventTone = (event: AgentEvent) => {
   }
 
   return "border-zinc-300 bg-zinc-100 text-zinc-800"
+}
+
+const getActionEid = (event: AgentEvent) => {
+  if (
+    event.type === "step_planned" &&
+    "eid" in event.action &&
+    typeof event.action.eid === "string"
+  ) {
+    return event.action.eid
+  }
+
+  return null
+}
+
+const getPlannedCandidate = (
+  event: Extract<AgentEvent, { type: "step_planned" }>
+) => {
+  const eid = getActionEid(event)
+
+  if (!eid) {
+    return undefined
+  }
+
+  return event.snapshot.elements.find((candidate) => candidate.eid === eid)
+}
+
+const isExecutionTraceReference = (
+  trace: AgentStepExecution["trace"]
+): trace is AgentExecutionTraceReference => {
+  return Boolean(trace && "tracePath" in trace)
+}
+
+const formatCandidateLabel = (candidate?: ElementCandidate) => {
+  if (!candidate) {
+    return ""
+  }
+
+  return (
+    candidate.label ||
+    candidate.questionText ||
+    candidate.text ||
+    candidate.selector ||
+    candidate.eid
+  )
+}
+
+const formatExecutionNode = (
+  label: string,
+  node?: AgentExecutionTrace["resolvedElement"]
+) => {
+  if (!node) {
+    return null
+  }
+
+  const parts = [
+    node.selector,
+    node.tagName,
+    node.role ? `role=${node.role}` : "",
+    node.text ? `text=${node.text}` : "",
+    node.valuePreview ? `value=${node.valuePreview}` : ""
+  ].filter(Boolean)
+
+  return (
+    <p className="m-0 text-[11px] leading-[1.45] text-neutral-700" key={label}>
+      <span className="font-medium text-neutral-900">{label}:</span>{" "}
+      {parts.join(" | ")}
+    </p>
+  )
+}
+
+const formatPopupSummary = (
+  label: string,
+  popup?: AgentExecutionPopupSummary
+) => {
+  if (!popup) {
+    return null
+  }
+
+  return (
+    <p className="m-0 text-[11px] leading-[1.45] text-neutral-700" key={label}>
+      <span className="font-medium text-neutral-900">{label}:</span> state=
+      {popup.popupState}, options={popup.relatedOptionCount}
+      {popup.optionLabels.length > 0
+        ? ` (${popup.optionLabels.join(", ")})`
+        : ""}
+    </p>
+  )
+}
+
+const renderPlanDetails = (
+  event: Extract<AgentEvent, { type: "step_planned" }>
+) => {
+  const candidate = getPlannedCandidate(event)
+
+  return (
+    <details className="mt-2 rounded-md border border-neutral-200 bg-white px-2 py-1">
+      <summary className="cursor-pointer text-[11px] font-medium text-neutral-700">
+        Plan details
+      </summary>
+      <div className="mt-2 flex flex-col gap-1">
+        <p className="m-0 text-[11px] leading-[1.45] text-neutral-700">
+          <span className="font-medium text-neutral-900">Rationale:</span>{" "}
+          {event.rationale}
+        </p>
+        <p className="m-0 text-[11px] leading-[1.45] text-neutral-700">
+          <span className="font-medium text-neutral-900">Action:</span>{" "}
+          {JSON.stringify(event.action)}
+        </p>
+        {candidate ? (
+          <>
+            <p className="m-0 text-[11px] leading-[1.45] text-neutral-700">
+              <span className="font-medium text-neutral-900">Target:</span>{" "}
+              {formatCandidateLabel(candidate)}
+            </p>
+            <p className="m-0 text-[11px] leading-[1.45] text-neutral-700">
+              <span className="font-medium text-neutral-900">Control:</span>{" "}
+              {candidate.controlKind} / popup={candidate.popupState}
+            </p>
+            <p className="m-0 break-all text-[11px] leading-[1.45] text-neutral-700">
+              <span className="font-medium text-neutral-900">Selector:</span>{" "}
+              {candidate.selector}
+            </p>
+          </>
+        ) : null}
+        {event.planner?.tracePath ? (
+          <p className="m-0 break-all text-[11px] leading-[1.45] text-neutral-700">
+            <span className="font-medium text-neutral-900">Planner trace:</span>{" "}
+            {event.planner.tracePath}
+          </p>
+        ) : null}
+      </div>
+    </details>
+  )
+}
+
+const renderExecutionDetails = (
+  event: Extract<AgentEvent, { type: "step_result" }>
+) => {
+  if (!event.execution?.trace) {
+    return null
+  }
+
+  if (isExecutionTraceReference(event.execution.trace)) {
+    return (
+      <details className="mt-2 rounded-md border border-neutral-200 bg-white px-2 py-1">
+        <summary className="cursor-pointer text-[11px] font-medium text-neutral-700">
+          Execution details
+        </summary>
+        <div className="mt-2 flex flex-col gap-1">
+          <p className="m-0 break-all text-[11px] leading-[1.45] text-neutral-700">
+            <span className="font-medium text-neutral-900">
+              Execution trace:
+            </span>{" "}
+            {event.execution.trace.tracePath}
+          </p>
+          <p className="m-0 text-[11px] leading-[1.45] text-neutral-700">
+            <span className="font-medium text-neutral-900">Resolution:</span>{" "}
+            {event.execution.trace.summary.resolution || "n/a"}
+          </p>
+        </div>
+      </details>
+    )
+  }
+
+  const trace = event.execution.trace
+
+  return (
+    <details className="mt-2 rounded-md border border-neutral-200 bg-white px-2 py-1">
+      <summary className="cursor-pointer text-[11px] font-medium text-neutral-700">
+        Execution details
+      </summary>
+      <div className="mt-2 flex flex-col gap-1">
+        {trace.requestedCandidate ? (
+          <p className="m-0 text-[11px] leading-[1.45] text-neutral-700">
+            <span className="font-medium text-neutral-900">
+              Requested target:
+            </span>{" "}
+            {trace.requestedCandidate.label ||
+              trace.requestedCandidate.questionText ||
+              trace.requestedCandidate.selector}
+            {` | ${trace.requestedCandidate.controlKind}`}
+          </p>
+        ) : null}
+        <p className="m-0 text-[11px] leading-[1.45] text-neutral-700">
+          <span className="font-medium text-neutral-900">Resolution:</span>{" "}
+          {trace.resolutionStrategy.join(" -> ") || "n/a"}
+        </p>
+        {formatExecutionNode("Resolved", trace.resolvedElement)}
+        {formatExecutionNode("Interaction", trace.interactionElement)}
+        {formatExecutionNode("Clicked", trace.clickTarget)}
+        {formatExecutionNode("Active before", trace.activeElementBefore)}
+        {formatExecutionNode("Active after", trace.activeElementAfter)}
+        {formatPopupSummary("Popup before", trace.popupBefore)}
+        {formatPopupSummary("Popup after", trace.popupAfter)}
+        {trace.afterSnapshot ? (
+          <p className="m-0 text-[11px] leading-[1.45] text-neutral-700">
+            <span className="font-medium text-neutral-900">
+              After snapshot:
+            </span>{" "}
+            {`${trace.afterSnapshot.url} | candidates=${trace.afterSnapshot.totalCandidates} | visible=${trace.afterSnapshot.visibleCandidates}`}
+          </p>
+        ) : null}
+        {trace.afterSnapshot?.relatedOptions
+          ? formatPopupSummary(
+              "Related options after",
+              trace.afterSnapshot.relatedOptions
+            )
+          : null}
+      </div>
+    </details>
+  )
 }
 
 type StartResponse =
@@ -1257,9 +1475,17 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
                         className={`inline-flex min-w-[50px] items-center justify-center rounded-full border px-[6px] py-[2px] text-[10px] uppercase tracking-[0.08em] ${eventTone(event)}`}>
                         {eventLabel(event)}
                       </span>
-                      <p className="m-0 text-[12px] leading-[1.45] text-neutral-900">
-                        {log.text}
-                      </p>
+                      <div className="min-w-0">
+                        <p className="m-0 text-[12px] leading-[1.45] text-neutral-900">
+                          {log.text}
+                        </p>
+                        {event.type === "step_planned"
+                          ? renderPlanDetails(event)
+                          : null}
+                        {event.type === "step_result"
+                          ? renderExecutionDetails(event)
+                          : null}
+                      </div>
                     </div>
                   )
                 })

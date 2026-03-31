@@ -16,6 +16,15 @@ export const rankCandidates = (
   const commandLower = command.toLowerCase()
   const typingIntent =
     /\b(type|enter|fill|input|write|search|formula|cell)\b/.test(commandLower)
+  const clearIntent =
+    /\b(clear|reset|erase|empty|remove|wipe|blank out)\b/.test(commandLower)
+  const fillIntent =
+    /\b(fill|complete|populate|finish|submit|application|form)\b/.test(
+      commandLower
+    )
+  const fillAllIntent =
+    /\b(rest|remaining|all|entire)\b/.test(commandLower) ||
+    /\bfill (?:this|the) form\b/.test(commandLower)
   const clickIntent = /\b(click|open|select|tap|press)\b/.test(commandLower)
   const formIntent =
     /\b(form|application|apply|profile|register|signup|sign up|submit)\b/.test(
@@ -24,6 +33,11 @@ export const rankCandidates = (
 
   const scored = candidates.map((candidate) => {
     const haystack = [
+      candidate.controlKind,
+      candidate.popupState,
+      candidate.optionSource ?? "",
+      candidate.frameTitle,
+      candidate.frameUrl,
       candidate.text,
       candidate.label,
       candidate.placeholder,
@@ -51,18 +65,25 @@ export const rankCandidates = (
     const isButtonLike =
       candidate.tagName === "button" ||
       candidate.role === "button" ||
+      candidate.controlKind === "select_option" ||
       candidate.tagName === "a"
     const isEditable =
+      candidate.controlKind === "custom_select" ||
       candidate.tagName === "input" ||
       candidate.tagName === "textarea" ||
       candidate.tagName === "select" ||
       candidate.role === "textbox" ||
-      candidate.inputType !== null
+      (candidate.inputType !== null &&
+        candidate.controlKind !== "select_option")
     const isChoiceControl =
       candidate.inputType === "checkbox" ||
       candidate.inputType === "radio" ||
       candidate.role === "checkbox" ||
       candidate.role === "radio"
+    const isSelectOption = candidate.controlKind === "select_option"
+    const isCustomSelect = candidate.controlKind === "custom_select"
+    const hasValue = candidate.valuePreview.trim().length > 0
+    const isSelected = candidate.checked === true
     const isLabelOption =
       candidate.tagName === "label" &&
       candidate.forAttr.length > 0 &&
@@ -108,11 +129,71 @@ export const rankCandidates = (
       score -= 2
     }
 
+    if (typingIntent && isCustomSelect) {
+      score -= 1
+    }
+
+    if (!clearIntent && fillIntent && isEditable && hasValue) {
+      score -= 5
+    }
+
+    if (!clearIntent && fillIntent && isChoiceControl && isSelected) {
+      score -= 5
+    }
+
+    if (fillAllIntent && isEditable && !hasValue) {
+      score += candidate.required ? 3 : 1
+    }
+
+    if (fillAllIntent && isChoiceControl && !isSelected) {
+      score += candidate.required ? 3 : 1
+    }
+
+    if (clearIntent && isEditable) {
+      score += hasValue ? 7 : -6
+    }
+
+    if (clearIntent && isCustomSelect) {
+      score += hasValue ? 4 : -5
+    }
+
+    if (clearIntent && isChoiceControl) {
+      score += isSelected ? 6 : -5
+    }
+
+    if (
+      clearIntent &&
+      isButtonLike &&
+      /\b(clear|reset|remove|erase)\b/.test(haystack)
+    ) {
+      score += 6
+    }
+
     if (formIntent && isEditable) {
       score += 2
     }
 
+    if (candidate.frameId !== 0 && isEditable) {
+      score += 2
+    }
+
+    if (isCustomSelect) {
+      score += 2
+    }
+
     if (formIntent && (isChoiceControl || isLabelOption)) {
+      score += 3
+    }
+
+    if (isSelectOption && candidate.visible) {
+      score += 4
+    }
+
+    if (isSelectOption && candidate.inViewport) {
+      score += 2
+    }
+
+    if (candidate.popupState === "open" && isSelectOption) {
       score += 3
     }
 

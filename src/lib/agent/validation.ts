@@ -84,6 +84,42 @@ export const isAgentPlan = (input: unknown): input is AgentPlan => {
   )
 }
 
+export const normalizeAgentPlan = (input: unknown): AgentPlan | null => {
+  if (isAgentPlan(input)) {
+    return input
+  }
+
+  if (Array.isArray(input)) {
+    if (input.length === 1 && isAgentPlan(input[0])) {
+      return input[0]
+    }
+
+    return null
+  }
+
+  if (!isObject(input)) {
+    return null
+  }
+
+  const wrappedCandidates = [input.plan, input.result, input.output]
+
+  for (const candidate of wrappedCandidates) {
+    if (isAgentPlan(candidate)) {
+      return candidate
+    }
+
+    if (
+      Array.isArray(candidate) &&
+      candidate.length === 1 &&
+      isAgentPlan(candidate[0])
+    ) {
+      return candidate[0]
+    }
+  }
+
+  return null
+}
+
 export const findCandidate = (
   candidates: ElementCandidate[],
   eid: string
@@ -102,7 +138,7 @@ export const isSensitiveAction = (
   const candidate = findCandidate(candidates, action.eid)
 
   if (!candidate) {
-    return true
+    return false
   }
 
   const text = `${candidate.text} ${candidate.label}`.toLowerCase()

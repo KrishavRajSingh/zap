@@ -3,7 +3,8 @@ import type { NextApiRequest, NextApiResponse } from "next"
 import type {
   AgentStepRecord,
   PageSnapshot,
-  PlannerMemoryEntry
+  PlannerMemoryEntry,
+  PlannerTraceRequestMeta
 } from "~lib/agent/types"
 import { isObject } from "~lib/agent/validation"
 import { requireApiAuth } from "~lib/server/auth"
@@ -14,6 +15,7 @@ type RequestBody = {
   snapshot: PageSnapshot
   history: AgentStepRecord[]
   memory?: PlannerMemoryEntry[]
+  plannerTrace?: PlannerTraceRequestMeta
 }
 
 const isValidMemoryEntry = (value: unknown): value is PlannerMemoryEntry => {
@@ -26,6 +28,21 @@ const isValidMemoryEntry = (value: unknown): value is PlannerMemoryEntry => {
   )
 }
 
+const isValidPlannerTrace = (
+  value: unknown
+): value is PlannerTraceRequestMeta => {
+  return (
+    isObject(value) &&
+    typeof value.runId === "string" &&
+    typeof value.step === "number" &&
+    Number.isInteger(value.step) &&
+    value.step >= 1 &&
+    typeof value.attempt === "number" &&
+    Number.isInteger(value.attempt) &&
+    value.attempt >= 1
+  )
+}
+
 const isValidBody = (body: unknown): body is RequestBody => {
   return (
     isObject(body) &&
@@ -33,7 +50,8 @@ const isValidBody = (body: unknown): body is RequestBody => {
     isObject(body.snapshot) &&
     Array.isArray(body.history) &&
     (body.memory === undefined ||
-      (Array.isArray(body.memory) && body.memory.every(isValidMemoryEntry)))
+      (Array.isArray(body.memory) && body.memory.every(isValidMemoryEntry))) &&
+    (body.plannerTrace === undefined || isValidPlannerTrace(body.plannerTrace))
   )
 }
 
@@ -56,8 +74,18 @@ export default async function handler(
       return
     }
 
-    const plan = await requestPlanFromOpenRouter(req.body)
-    res.status(200).json(plan)
+    const { plannerTrace, ...input } = req.body
+    const result = await requestPlanFromOpenRouter(input, {
+      trace: plannerTrace
+    })
+
+    res
+      .status(200)
+      .json(
+        result.planner
+          ? { ...result.plan, planner: result.planner }
+          : result.plan
+      )
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error"
     res.status(500).json({ error: message })
