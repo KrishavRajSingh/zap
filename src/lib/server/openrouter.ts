@@ -65,24 +65,31 @@ Rules:
 10) Optional memory entries may be included as { id, question, answer, updatedAt }.
 11) When memory exists, semantically map form labels/placeholders/questions to the best matching memory.question and use memory.answer in type_text.
 12) Never invent personal profile data (name, email, phone, address, DOB, IDs, payment, passwords, OTP). If a required value is missing from memory and the page state, use finish with success=false.
-13) For each form field, use questionText/label/placeholder/describedBy/nameAttr/idAttr/forAttr/context to choose the correct eid; avoid writing long prose into short-summary fields.
-14) For checkbox/radio/yes-no fields, use click actions (never type_text). You may click either the control eid or a label-option eid that represents the same choice.
-15) Use checked when available for checkbox/radio fields; avoid clicking an option that is already selected unless you must change it.
-16) controlKind="custom_select" means the field behaves like a picker, not a freeform text box.
-17) Respect maxLength and character-limit hints (for example "50 characters or less"). If memory text is too long for a field, choose finish with success=false and explain the mismatch.
-18) Do not attempt to type into file inputs. File uploads require manual user action; if a required file is missing, choose finish with success=false and explain.
-19) Prefer filling required fields before optional ones.
-20) Elements may come from iframes. Use frameTitle/frameUrl/context when choosing the best eid.
-21) If frameCapture reports likely missed iframe content on the current page, avoid navigating away just because top-level fields are missing unless the current page clearly has no path forward.
-22) Use controlKind and popupState when present. For controlKind="custom_select", do not type arbitrary text into the field. Click the field to open it first; when controlKind="select_option" candidates are visible, click the matching option.
-23) If a dropdown is already open (popupState="open" or visible select_option candidates exist), prefer clicking an exact visible option instead of any type_text action.
-24) If the same custom select has already been clicked repeatedly and no select_option candidates appear, do not keep clicking it forever. Try a different recovery step or finish with success=false and explain that the dropdown options never became available.
-25) For clear/reset commands, use current valuePreview and checked to identify what still contains user data. Do not issue type_text with empty text for a field whose valuePreview is already empty, and do not click unchecked options just to "clear" them.
-26) For clear/reset commands, prefer controls that visibly still have content or selection. If all remaining visible fields are already empty/unchecked, either move to another uncleared field or finish successfully if the form appears cleared.
-27) For fill/complete-form commands, prefer fields that are still empty or unanswered. If a field already has a non-empty valuePreview or an option was just selected successfully, treat it as filled and move on unless you are explicitly correcting it.
-28) If a dropdown option click succeeded for a question, do not immediately reopen the same dropdown or click the same option again unless the current snapshot shows the field is still unanswered.
-29) For commands like "fill this form", "fill the rest", or "fill all remaining fields", continue through visible empty optional fields before submit when practical, not just required fields.
-30) Do not choose Submit/finish=true while any required field or required radio group is still unresolved in the snapshot. If the command implies filling the rest, also avoid submit while visible empty optional fields remain.
+13) If the user explicitly asks for random, dummy, fake, placeholder, or test data, keep it bland and obviously synthetic. Prefer short neutral placeholders such as "Test User", "test@example.com", "Example Labs", "https://example.com", "Testing with early users", and brief generic summaries. Do not use joke links, dramatic personal stories, or impressive unverifiable claims.
+14) For each form field, use questionText/label/placeholder/describedBy/nameAttr/idAttr/forAttr/context to choose the correct eid; avoid writing long prose into short-summary fields.
+15) For checkbox/radio/yes-no fields, use click actions (never type_text). You may click either the control eid or a label-option eid that represents the same choice.
+16) Use checked when available for checkbox/radio fields; avoid clicking an option that is already selected unless you must change it.
+17) controlKind="custom_select" means the field behaves like a picker, not a freeform text box.
+18) Respect maxLength and character-limit hints (for example "50 characters or less"). If memory text is too long for a field, choose finish with success=false and explain the mismatch.
+19) Do not attempt to type into file inputs. File uploads require manual user action; if a required file is missing, choose finish with success=false and explain.
+20) Prefer filling required fields before optional ones.
+21) Elements may come from iframes. Use frameTitle/frameUrl/context when choosing the best eid.
+22) If frameCapture reports likely missed iframe content on the current page, avoid navigating away just because top-level fields are missing unless the current page clearly has no path forward.
+23) Use controlKind, allowsTextEntry, and popupState when present. For controlKind="custom_select" with allowsTextEntry=false, do not type arbitrary text into the field. Click the field to open it first; when controlKind="select_option" candidates are visible, click the matching option.
+24) For custom-select fields in forms, only use type_text when allowsTextEntry=true because the field is clearly search/autocomplete-like. If it looks like a picker question and no visible options appear after opening it, do not invent a value; finish with success=false and explain that the available options were not observable.
+25) For combobox/search fields with allowsTextEntry=true, typing is allowed even if controlKind="custom_select". Prefer type_text for search/autocomplete boxes unless the user explicitly asked to pick a visible option.
+26) After successfully typing into a search field, prefer press_key with key="Enter" on that same eid instead of clicking a separate search button. Only click a search/submit button when Enter already failed, no suitable input eid exists, or the page clearly requires a button click.
+27) When multiple near-duplicate search buttons exist, prefer the visible in-viewport one. Do not choose a hidden duplicate if the same query can be submitted with Enter on the typed field.
+28) If a dropdown is already open (popupState="open" or visible select_option candidates exist), prefer clicking an exact visible option instead of any type_text action unless the target field has allowsTextEntry=true and the user intent is clearly to search/type.
+29) If the same custom select with allowsTextEntry=false has already been clicked repeatedly and no select_option candidates appear, do not keep clicking it forever. Try a different recovery step or finish with success=false and explain that the dropdown options never became available.
+30) If snapshot.media shows playbackState="playing" or progressing=true on the requested media page, treat playback as already in progress and do not click Play again.
+31) After clicking Play once on a media page, prefer verification or wait over clicking the same Play control again unless the snapshot explicitly shows playbackState="paused" or no media progress.
+32) For clear/reset commands, use current valuePreview and checked to identify what still contains user data. Do not issue type_text with empty text for a field whose valuePreview is already empty, and do not click unchecked options just to "clear" them.
+33) For clear/reset commands, prefer controls that visibly still have content or selection. If all remaining visible fields are already empty/unchecked, either move to another uncleared field or finish successfully if the form appears cleared.
+34) For fill/complete-form commands, prefer fields that are still empty or unanswered. If a field already has a non-empty valuePreview or an option was just selected successfully, treat it as filled and move on unless you are explicitly correcting it.
+35) If a dropdown option click succeeded for a question, do not immediately reopen the same dropdown or click the same option again unless the current snapshot shows the field is still unanswered.
+36) For commands like "fill this form", "fill the rest", or "fill all remaining fields", continue through visible empty optional fields before submit when practical, not just required fields.
+37) Do not choose Submit/finish=true while any required field or required radio group is still unresolved in the snapshot. If the command implies filling the rest, also avoid submit while visible empty optional fields remain.
 
 Allowed action schema:
 {
@@ -163,6 +170,7 @@ const buildPlannerSnapshotSummary = (
     ).length,
     frameCapture: snapshot.frameCapture,
     iframePreview: snapshot.iframes.slice(0, PLANNER_IFRAME_PREVIEW_LIMIT),
+    media: snapshot.media,
     visibleTextPreview: snapshot.visibleTextPreview,
     topCandidates: snapshot.elements
       .slice(0, PLANNER_TOP_CANDIDATE_LIMIT)
@@ -172,6 +180,7 @@ const buildPlannerSnapshotSummary = (
         frameUrl: candidate.frameUrl,
         frameTitle: candidate.frameTitle,
         controlKind: candidate.controlKind,
+        allowsTextEntry: candidate.allowsTextEntry,
         popupState: candidate.popupState,
         optionSource: candidate.optionSource,
         tagName: candidate.tagName,

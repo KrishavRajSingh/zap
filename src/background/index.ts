@@ -20,6 +20,8 @@ import type {
   AgentStepExecution,
   AgentStepRecord,
   ElementCandidate,
+  MediaPlaybackState,
+  PageMediaSummary,
   PageSnapshot,
   PlannerMemoryEntry,
   PlannerTraceReference
@@ -52,6 +54,11 @@ type RunSession = {
   controlValueOverrides: Map<string, string>
   memoryLoaded: boolean
   memoryCache: PlannerMemoryEntry[]
+  lastMediaObservation: {
+    url: string
+    currentTime: number | null
+    playbackState: MediaPlaybackState
+  } | null
 }
 
 const sessions = new Map<string, RunSession>()
@@ -460,12 +467,10 @@ const applyControlValueOverrides = (
     return snapshot
   }
 
+  const overriddenControls = new Map<string, string>()
+
   snapshot.elements = snapshot.elements.map((candidate) => {
     if (candidate.controlKind !== "custom_select") {
-      return candidate
-    }
-
-    if (candidate.valuePreview.trim().length > 0) {
       return candidate
     }
 
@@ -477,9 +482,48 @@ const applyControlValueOverrides = (
       return candidate
     }
 
+    const controlKey = getControlValueOverrideKey(
+      candidate.frameId,
+      candidate.frameUrl,
+      getControlSelector(candidate)
+    )
+    overriddenControls.set(controlKey, override)
+
     return {
       ...candidate,
-      valuePreview: override
+      valuePreview: override,
+      popupState: "closed"
+    }
+  })
+
+  if (overriddenControls.size === 0) {
+    return snapshot
+  }
+
+  snapshot.elements = snapshot.elements.map((candidate) => {
+    if (
+      candidate.controlKind !== "select_option" ||
+      !candidate.ownerControlSelector
+    ) {
+      return candidate
+    }
+
+    const ownerKey = getControlValueOverrideKey(
+      candidate.frameId,
+      candidate.frameUrl,
+      candidate.ownerControlSelector
+    )
+
+    if (!overriddenControls.has(ownerKey)) {
+      return candidate
+    }
+
+    return {
+      ...candidate,
+      popupState: "closed",
+      visible: false,
+      inViewport: false,
+      enabled: false
     }
   })
 
@@ -491,6 +535,13 @@ const doesOptionBelongToControl = (
   control: ElementCandidate
 ) => {
   if (option.controlKind !== "select_option") {
+    return false
+  }
+
+  if (
+    option.frameId !== control.frameId ||
+    option.frameUrl !== control.frameUrl
+  ) {
     return false
   }
 
@@ -510,7 +561,11 @@ const doesOptionBelongToControl = (
     control.label || control.questionText
   ).toLowerCase()
 
-  return optionLabel.length > 0 && optionLabel === controlLabel
+  return (
+    control.popupState === "open" &&
+    optionLabel.length > 0 &&
+    optionLabel === controlLabel
+  )
 }
 
 const buildExecutionCandidateSummary = (
@@ -521,6 +576,7 @@ const buildExecutionCandidateSummary = (
     frameId: candidate.frameId,
     frameUrl: candidate.frameUrl,
     controlKind: candidate.controlKind,
+    allowsTextEntry: candidate.allowsTextEntry,
     popupState: candidate.popupState,
     optionSource: candidate.optionSource,
     label: candidate.label,
@@ -583,6 +639,7 @@ const buildAfterSnapshotSummary = (
     visibleCandidates: snapshot.elements.filter((item) => item.visible).length,
     inViewportCandidates: snapshot.elements.filter((item) => item.inViewport)
       .length,
+    media: snapshot.media,
     visibleTextPreview: snapshot.visibleTextPreview.slice(0, 8),
     ...(candidate
       ? {
@@ -600,6 +657,23 @@ const buildAfterSnapshotSummary = (
         }
       : {})
   }
+}
+
+const isPlayButtonCandidate = (candidate?: ElementCandidate) => {
+  if (!candidate) {
+    return false
+  }
+
+  const descriptor =
+    `${candidate.text} ${candidate.label} ${candidate.questionText}`
+      .toLowerCase()
+      .trim()
+
+  if (!/\bplay\b/.test(descriptor)) {
+    return false
+  }
+
+  return !/\bautoplay\b/.test(descriptor)
 }
 
 const byUpdatedAtDesc = (
@@ -962,6 +1036,7 @@ type RawRect = {
 
 type RawCandidate = {
   controlKind: ElementCandidate["controlKind"]
+  allowsTextEntry: ElementCandidate["allowsTextEntry"]
   popupState: ElementCandidate["popupState"]
   optionSource: ElementCandidate["optionSource"]
   tagName: string
@@ -1008,6 +1083,8 @@ type RawFrameHost = {
   inViewport: boolean
 }
 
+type RawMediaSummary = Omit<PageMediaSummary, "progressing">
+
 type FrameLocalSnapshot = {
   url: string
   title: string
@@ -1018,6 +1095,7 @@ type FrameLocalSnapshot = {
   }
   frameHost: RawFrameHost | null
   iframes: RawIframe[]
+  media: RawMediaSummary | null
   visibleTextPreview: string[]
   elements: RawCandidate[]
 }
@@ -1557,6 +1635,88 @@ const collectSnapshotInPage = () => {
     return "unknown"
   }
 
+  const isSearchLikeCustomSelect = (element: Element) => {
+    const htmlElement = element as HTMLElement
+    const textSignals = [
+      htmlElement.getAttribute("role"),
+      htmlElement.getAttribute("aria-autocomplete"),
+      htmlElement.getAttribute("aria-label"),
+      htmlElement.getAttribute("placeholder"),
+      htmlElement.getAttribute("name"),
+      htmlElement.getAttribute("id"),
+      htmlElement.getAttribute("autocomplete")
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+
+    if (htmlElement.getAttribute("role") === "combobox") {
+      return true
+    }
+
+    if (htmlElement.hasAttribute("aria-autocomplete")) {
+      return true
+    }
+
+    return /\b(search|searchbox|query|find|lookup|look up|autocomplete)\b/.test(
+      textSignals
+    )
+  }
+
+  const allowsTextEntry = (
+    element: Element,
+    inputType: string | null,
+    controlKind: RawCandidate["controlKind"]
+  ) => {
+    const htmlElement = element as HTMLElement
+    const role = htmlElement.getAttribute("role")
+
+    if (htmlElement instanceof HTMLTextAreaElement) {
+      return !htmlElement.readOnly && !htmlElement.disabled
+    }
+
+    if (htmlElement instanceof HTMLInputElement) {
+      const normalizedType = (
+        inputType ||
+        htmlElement.type ||
+        "text"
+      ).toLowerCase()
+
+      if (
+        [
+          "button",
+          "checkbox",
+          "color",
+          "file",
+          "hidden",
+          "image",
+          "radio",
+          "range",
+          "reset",
+          "submit"
+        ].includes(normalizedType)
+      ) {
+        return false
+      }
+
+      if (htmlElement.readOnly || htmlElement.disabled) {
+        return false
+      }
+
+      if (controlKind === "custom_select") {
+        return isSearchLikeCustomSelect(element)
+      }
+
+      return true
+    }
+
+    if (htmlElement.isContentEditable || role === "textbox") {
+      return true
+    }
+
+    return false
+  }
+
   const getControlKind = (
     element: Element,
     inputType: string | null
@@ -1976,6 +2136,85 @@ const collectSnapshotInPage = () => {
     }
   }
 
+  const getMediaSummary = (): RawMediaSummary | null => {
+    const mediaElements = Array.from(document.querySelectorAll("video, audio"))
+
+    if (mediaElements.length === 0) {
+      return null
+    }
+
+    const bestMedia = mediaElements
+      .filter((element): element is HTMLMediaElement => {
+        return element instanceof HTMLMediaElement
+      })
+      .sort((left, right) => {
+        const score = (element: HTMLMediaElement) => {
+          let value = 0
+
+          if (!element.paused && !element.ended) {
+            value += 10
+          }
+
+          if (inViewport(element)) {
+            value += 4
+          }
+
+          if (isVisible(element)) {
+            value += 2
+          }
+
+          if (element.currentTime > 0) {
+            value += 1
+          }
+
+          const rect = element.getBoundingClientRect()
+          return value + Math.round(rect.width * rect.height)
+        }
+
+        return score(right) - score(left)
+      })[0]
+
+    if (!bestMedia) {
+      return null
+    }
+
+    const playbackState: MediaPlaybackState = bestMedia.ended
+      ? "ended"
+      : bestMedia.paused
+        ? "paused"
+        : "playing"
+    const fallbackTitle = (() => {
+      if (!bestMedia.currentSrc) {
+        return ""
+      }
+
+      try {
+        return new URL(bestMedia.currentSrc).pathname
+      } catch {
+        return bestMedia.currentSrc
+      }
+    })()
+
+    return {
+      kind: bestMedia instanceof HTMLVideoElement ? "video" : "audio",
+      playbackState,
+      currentTime: Number.isFinite(bestMedia.currentTime)
+        ? Number(bestMedia.currentTime.toFixed(1))
+        : null,
+      duration: Number.isFinite(bestMedia.duration)
+        ? Number(bestMedia.duration.toFixed(1))
+        : null,
+      muted: bestMedia.muted,
+      visible: isVisible(bestMedia),
+      inViewport: inViewport(bestMedia),
+      title: normalize(
+        bestMedia.getAttribute("title") ||
+          bestMedia.getAttribute("aria-label") ||
+          fallbackTitle
+      )
+    }
+  }
+
   const query = [
     "button",
     "a[href]",
@@ -2030,14 +2269,16 @@ const collectSnapshotInPage = () => {
         ? htmlElement.type || "text"
         : null
     const controlKind = getControlKind(element, inputType)
+    const canTypeText = allowsTextEntry(element, inputType, controlKind)
     const selector = createSelector(element)
     const dropdownRoot =
       controlKind === "custom_select"
-        ? getDropdownRoot(element) ?? htmlElement
+        ? (getDropdownRoot(element) ?? htmlElement)
         : null
 
     const candidate: RawCandidate = {
       controlKind,
+      allowsTextEntry: canTypeText,
       popupState: getPopupState(element, controlKind),
       optionSource: null,
       tagName: element.tagName.toLowerCase(),
@@ -2432,6 +2673,7 @@ const collectSnapshotInPage = () => {
     unique.add(option)
     rawCandidates.push({
       controlKind: "select_option",
+      allowsTextEntry: false,
       popupState: "open",
       optionSource: "aria_role",
       tagName: option.tagName.toLowerCase(),
@@ -2503,6 +2745,7 @@ const collectSnapshotInPage = () => {
       unique.add(option)
       rawCandidates.push({
         controlKind: "select_option",
+        allowsTextEntry: false,
         popupState: "open",
         optionSource: "generic_popup",
         tagName: option.tagName.toLowerCase(),
@@ -2587,12 +2830,53 @@ const collectSnapshotInPage = () => {
     },
     frameHost: getFrameHost(),
     iframes: rawIframes,
+    media: getMediaSummary(),
     visibleTextPreview,
     elements: rawCandidates
   } satisfies FrameLocalSnapshot
 }
 
 const MAX_VISIBLE_TEXT_PREVIEW_ITEMS = 24
+
+const normalizeMediaSummary = (
+  snapshot: PageSnapshot,
+  session?: RunSession
+): PageSnapshot => {
+  const media = snapshot.media
+
+  if (!media) {
+    if (session) {
+      session.lastMediaObservation = null
+    }
+
+    return snapshot
+  }
+
+  const previousObservation = session?.lastMediaObservation
+  const progressing =
+    previousObservation?.url === snapshot.url &&
+    previousObservation.currentTime !== null &&
+    media.currentTime !== null &&
+    media.currentTime > previousObservation.currentTime + 0.4
+
+  const normalizedSnapshot: PageSnapshot = {
+    ...snapshot,
+    media: {
+      ...media,
+      progressing: progressing || media.playbackState === "playing"
+    }
+  }
+
+  if (session) {
+    session.lastMediaObservation = {
+      url: snapshot.url,
+      currentTime: media.currentTime,
+      playbackState: media.playbackState
+    }
+  }
+
+  return normalizedSnapshot
+}
 
 const mergeFrameSnapshots = (
   frameResults: chrome.scripting.InjectionResult<FrameLocalSnapshot>[]
@@ -2612,6 +2896,35 @@ const mergeFrameSnapshots = (
   const visibleTextPreview: string[] = []
   const visibleTextKeys = new Set<string>()
   const mergedElements: ElementCandidate[] = []
+  const mergedMedia =
+    sortedFrameResults
+      .map((item) => item.result.media)
+      .filter((item): item is RawMediaSummary => item !== null)
+      .sort((left, right) => {
+        const score = (media: RawMediaSummary) => {
+          let value = 0
+
+          if (media.playbackState === "playing") {
+            value += 10
+          }
+
+          if (media.inViewport) {
+            value += 4
+          }
+
+          if (media.visible) {
+            value += 2
+          }
+
+          if ((media.currentTime ?? 0) > 0) {
+            value += 1
+          }
+
+          return value
+        }
+
+        return score(right) - score(left)
+      })[0] ?? null
 
   const pushVisibleText = (value: string) => {
     const normalized = normalizeText(value)
@@ -2723,6 +3036,12 @@ const mergeFrameSnapshots = (
       likelyMissedIframeContent
     },
     iframes: iframePreview,
+    media: mergedMedia
+      ? {
+          ...mergedMedia,
+          progressing: false
+        }
+      : null,
     visibleTextPreview: visibleTextPreview.slice(
       0,
       MAX_VISIBLE_TEXT_PREVIEW_ITEMS
@@ -2744,6 +3063,7 @@ type DomTarget = {
   label: string
   tagName: string
   controlKind: ElementCandidate["controlKind"]
+  allowsTextEntry: ElementCandidate["allowsTextEntry"]
   optionSource: ElementCandidate["optionSource"]
 }
 
@@ -2780,8 +3100,12 @@ type DomActionResult = {
   trace?: AgentExecutionTrace
 }
 
-const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
+const runDomActionInPage = async (
+  payload: DomActionPayload
+): Promise<DomActionResult> => {
   const normalize = (value: string) => value.replace(/\s+/g, " ").trim()
+  const domDelay = (ms: number) =>
+    new Promise<void>((resolve) => window.setTimeout(resolve, ms))
   const isVisibleElement = (element: HTMLElement) => {
     const rect = element.getBoundingClientRect()
     const style = window.getComputedStyle(element)
@@ -3135,7 +3459,30 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
     }
   }
 
-  const recoverStaleSelectOptionTarget = (
+  const waitForPopupState = async (
+    anchor: HTMLElement,
+    settleMs = 120,
+    attempts = 3
+  ) => {
+    let popup = probePopupState(anchor)
+
+    if (popup.popupState === "open" || popup.relatedOptionCount > 0) {
+      return popup
+    }
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      await domDelay(settleMs)
+      popup = probePopupState(anchor)
+
+      if (popup.popupState === "open" || popup.relatedOptionCount > 0) {
+        return popup
+      }
+    }
+
+    return popup
+  }
+
+  const recoverStaleSelectOptionTarget = async (
     target: DomTarget,
     trace: AgentExecutionTrace
   ) => {
@@ -3158,7 +3505,7 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
           ) as HTMLElement)
         : ownerControl
 
-    const openResult = tryOpenCustomSelect({
+    const openResult = await tryOpenCustomSelect({
       resolvedElement: resolvedOwner,
       interactionElement: ownerControl,
       trace
@@ -3176,11 +3523,11 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
 
     return {
       optionElement,
-      popup: probePopupState(optionElement)
+      popup: await waitForPopupState(optionElement, 100, 2)
     }
   }
 
-  const tryOpenCustomSelect = (params: {
+  const tryOpenCustomSelect = async (params: {
     resolvedElement: HTMLElement
     interactionElement: HTMLElement
     trace: AgentExecutionTrace
@@ -3242,7 +3589,7 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
       params.trace.resolutionStrategy.push(`custom_select:${attempt.name}`)
       attempt.run()
 
-      const popup = probePopupState(attempt.element)
+      const popup = await waitForPopupState(attempt.element)
 
       if (popup.popupState === "open") {
         return {
@@ -3254,7 +3601,7 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
 
     return {
       clickTarget: params.interactionElement,
-      popup: probePopupState(params.interactionElement)
+      popup: await waitForPopupState(params.interactionElement)
     }
   }
 
@@ -3485,6 +3832,10 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
       targetElement.dispatchEvent(new KeyboardEvent("keypress", eventInit))
       targetElement.dispatchEvent(new KeyboardEvent("keyup", eventInit))
 
+      if (["Enter", "ArrowDown", " ", "Spacebar"].includes(payload.key)) {
+        await domDelay(120)
+      }
+
       if (
         payload.key === "Enter" &&
         (targetElement instanceof HTMLInputElement ||
@@ -3568,7 +3919,7 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
         payload.kind === "click" &&
         payload.target.controlKind === "select_option"
       ) {
-        const recoveredOption = recoverStaleSelectOptionTarget(
+        const recoveredOption = await recoverStaleSelectOptionTarget(
           payload.target,
           trace
         )
@@ -3639,8 +3990,11 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
 
       let popupAfterInteraction: AgentExecutionPopupSummary | undefined
 
-      if (payload.target.controlKind === "custom_select") {
-        const openResult = tryOpenCustomSelect({
+      if (
+        payload.target.controlKind === "custom_select" &&
+        !payload.target.allowsTextEntry
+      ) {
+        const openResult = await tryOpenCustomSelect({
           resolvedElement: element,
           interactionElement: resolvedInteractionElement,
           trace
@@ -3648,11 +4002,30 @@ const runDomActionInPage = (payload: DomActionPayload): DomActionResult => {
 
         popupAfterInteraction = openResult.popup
         trace.clickTarget = describeElement(openResult.clickTarget)
+
+        if (
+          popupAfterInteraction.popupState !== "open" &&
+          popupAfterInteraction.relatedOptionCount === 0
+        ) {
+          return {
+            ok: false,
+            details:
+              "Dropdown options did not become observable after opening the field",
+            trace: {
+              ...trace,
+              popupAfter: popupAfterInteraction,
+              activeElementAfter: describeElement(
+                document.activeElement as HTMLElement | null
+              )
+            }
+          }
+        }
       } else if (payload.target.controlKind === "select_option") {
         dispatchPointerClick(clickTarget)
-        popupAfterInteraction = probePopupState(clickTarget)
+        popupAfterInteraction = await waitForPopupState(clickTarget, 100, 2)
       } else {
         clickTarget.click()
+        await domDelay(80)
       }
 
       return {
@@ -3808,8 +4181,11 @@ const readSnapshot = async (
   })
 
   const snapshot = mergeFrameSnapshots(result)
+  const snapshotWithOverrides = session
+    ? applyControlValueOverrides(session, snapshot)
+    : snapshot
 
-  return session ? applyControlValueOverrides(session, snapshot) : snapshot
+  return normalizeMediaSummary(snapshotWithOverrides, session)
 }
 
 const buildDomTarget = (candidate: ElementCandidate): DomTarget => {
@@ -3823,6 +4199,7 @@ const buildDomTarget = (candidate: ElementCandidate): DomTarget => {
     label: candidate.label,
     tagName: candidate.tagName,
     controlKind: candidate.controlKind,
+    allowsTextEntry: candidate.allowsTextEntry,
     optionSource: candidate.optionSource
   }
 }
@@ -3969,6 +4346,92 @@ const inferCharacterLimit = (candidate: ElementCandidate): number | null => {
   return value
 }
 
+const isSyntheticFillCommand = (command: string) => {
+  return /\b(random|dummy|fake|placeholder|test data|sample data)\b/i.test(
+    command
+  )
+}
+
+const buildSafeSyntheticText = (
+  candidate: ElementCandidate,
+  requestedText: string
+) => {
+  const descriptor = [
+    candidate.label,
+    candidate.questionText,
+    candidate.placeholder,
+    candidate.nameAttr,
+    candidate.idAttr,
+    candidate.context
+  ]
+    .join(" ")
+    .toLowerCase()
+
+  if (candidate.inputType === "email" || /\bemail\b/.test(descriptor)) {
+    return "test@example.com"
+  }
+
+  if (candidate.inputType === "url") {
+    if (/linkedin/.test(descriptor)) {
+      return "https://www.linkedin.com/in/test-user"
+    }
+
+    if (/github/.test(descriptor)) {
+      return "https://github.com/example"
+    }
+
+    if (/twitter|twitter\/x|\bx\b/.test(descriptor)) {
+      return "https://x.com/example"
+    }
+
+    if (/video|demo/.test(descriptor)) {
+      return "https://example.com/demo"
+    }
+
+    return "https://example.com"
+  }
+
+  if (/\bname\b/.test(descriptor)) {
+    return "Test User"
+  }
+
+  if (/company name/.test(descriptor)) {
+    return "Example Labs"
+  }
+
+  if (/how many founders|team size/.test(descriptor)) {
+    return "1"
+  }
+
+  if (/traction|mrr|revenue|users/.test(descriptor)) {
+    return "Testing with early users"
+  }
+
+  if (/where are you based|location|based/.test(descriptor)) {
+    return "Remote"
+  }
+
+  if (/one line|describe what you are building/.test(descriptor)) {
+    return "Building software tools for teams."
+  }
+
+  if (
+    /coolest thing|other ideas|what convinced you|background/.test(descriptor)
+  ) {
+    return "Test response for automation."
+  }
+
+  if (candidate.tagName === "textarea") {
+    return "Test response for automation."
+  }
+
+  if (candidate.inputType === "number") {
+    return "1"
+  }
+
+  return requestedText.length > 80 ? "Test response." : requestedText
+}
+
 const getTypeTextGuardError = (candidate: ElementCandidate, text: string) => {
   if (text.length === 0 && candidate.valuePreview.trim().length === 0) {
     return "Field is already empty"
@@ -3978,7 +4441,7 @@ const getTypeTextGuardError = (candidate: ElementCandidate, text: string) => {
     return "File upload input detected; attach files manually before continuing"
   }
 
-  if (candidate.controlKind === "custom_select") {
+  if (candidate.controlKind === "custom_select" && !candidate.allowsTextEntry) {
     return "Target is a dropdown/select field; click it and choose a visible option instead of typing arbitrary text"
   }
 
@@ -4253,12 +4716,41 @@ const executeAction = async (
   }
 
   if (action.type === "type_text") {
+    if (isSyntheticFillCommand(session.command)) {
+      action.text = buildSafeSyntheticText(candidate, action.text)
+    }
+
     const guardError = getTypeTextGuardError(candidate, action.text)
 
     if (guardError) {
       return {
         ok: false,
         details: guardError
+      }
+    }
+  }
+
+  if (
+    action.type === "click" &&
+    candidate.controlKind === "select_option" &&
+    candidate.ownerControlSelector
+  ) {
+    const selectedValue = session.controlValueOverrides.get(
+      getControlValueOverrideKey(
+        candidate.frameId,
+        candidate.frameUrl,
+        candidate.ownerControlSelector
+      )
+    )
+
+    if (
+      selectedValue &&
+      normalizeText(selectedValue).toLowerCase() ===
+        normalizeText(candidate.text).toLowerCase()
+    ) {
+      return {
+        ok: false,
+        details: `Option "${candidate.text}" is already selected`
       }
     }
   }
@@ -4309,6 +4801,7 @@ const executeAction = async (
     result.ok &&
     action.type === "click" &&
     candidate.controlKind === "custom_select" &&
+    !candidate.allowsTextEntry &&
     (result.trace?.popupAfter?.relatedOptionCount ?? 0) > 0
   ) {
     result.details = `Opened dropdown for \"${candidate.label || candidate.questionText || "field"}\"`
@@ -4342,6 +4835,27 @@ const executeAction = async (
       candidate,
       session
     )
+
+    if (
+      action.type === "click" &&
+      candidate.controlKind === "custom_select" &&
+      !candidate.allowsTextEntry &&
+      afterSnapshot
+    ) {
+      const confirmedPopup = afterSnapshot.popup
+
+      if (
+        !confirmedPopup ||
+        (confirmedPopup.popupState !== "open" &&
+          confirmedPopup.relatedOptionCount === 0)
+      ) {
+        result.ok = false
+        result.details =
+          "Dropdown did not remain open long enough for options to be confirmed in the next snapshot"
+      } else {
+        result.details = `Opened dropdown for "${candidate.label || candidate.questionText || "field"}"`
+      }
+    }
 
     if (
       action.type === "type_text" &&
@@ -4846,7 +5360,8 @@ const createSession = async (startMessage: AgentStartMessage) => {
     lastInteractionFrameId: 0,
     controlValueOverrides: new Map(),
     memoryLoaded: false,
-    memoryCache: []
+    memoryCache: [],
+    lastMediaObservation: null
   }
 
   sessions.set(runId, session)
@@ -4936,7 +5451,23 @@ const runAgentLoop = async (session: RunSession) => {
           (item) => item.eid === clickAction.eid
         )
 
-        if (clickedCandidate?.controlKind === "custom_select") {
+        if (
+          isPlayButtonCandidate(clickedCandidate) &&
+          fullSnapshot.media &&
+          (fullSnapshot.media.playbackState === "playing" ||
+            fullSnapshot.media.progressing)
+        ) {
+          await finalizeRunSession(session, {
+            success: true,
+            message: "Stopped because media playback was already in progress"
+          })
+          return
+        }
+
+        if (
+          clickedCandidate?.controlKind === "custom_select" &&
+          !clickedCandidate.allowsTextEntry
+        ) {
           const key = `${fullSnapshot.url}|${getControlSelector(clickedCandidate)}`
           const hasVisibleOptions = snapshotForPlanner.elements.some((item) => {
             return doesOptionBelongToControl(item, clickedCandidate)

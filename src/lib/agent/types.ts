@@ -42,12 +42,27 @@ export type ElementPopupState = "closed" | "open" | "unknown"
 
 export type ElementOptionSource = "aria_role" | "generic_popup" | null
 
+export type MediaPlaybackState = "playing" | "paused" | "ended" | "unknown"
+
+export type PageMediaSummary = {
+  kind: "video" | "audio"
+  playbackState: MediaPlaybackState
+  currentTime: number | null
+  duration: number | null
+  progressing: boolean
+  muted: boolean
+  visible: boolean
+  inViewport: boolean
+  title: string
+}
+
 export type ElementCandidate = {
   eid: string
   frameId: number
   frameUrl: string
   frameTitle: string
   controlKind: ElementControlKind
+  allowsTextEntry: boolean
   popupState: ElementPopupState
   optionSource: ElementOptionSource
   tagName: string
@@ -88,6 +103,7 @@ export type PageSnapshot = {
   }
   frameCapture: PageFrameCapture
   iframes: PageIframe[]
+  media: PageMediaSummary | null
   visibleTextPreview: string[]
   elements: ElementCandidate[]
 }
@@ -125,6 +141,7 @@ export type PlannerSnapshotTopCandidate = {
   frameUrl: string
   frameTitle: string
   controlKind: ElementControlKind
+  allowsTextEntry: boolean
   popupState: ElementPopupState
   optionSource: ElementOptionSource
   tagName: string
@@ -152,6 +169,7 @@ export type PlannerSnapshotSummary = {
   linkCandidates: number
   frameCapture: PageFrameCapture
   iframePreview: PageIframe[]
+  media: PageMediaSummary | null
   visibleTextPreview: string[]
   topCandidates: PlannerSnapshotTopCandidate[]
 }
@@ -166,6 +184,7 @@ export type AgentExecutionCandidateSummary = {
   frameId: number
   frameUrl: string
   controlKind: ElementControlKind
+  allowsTextEntry: boolean
   popupState: ElementPopupState
   optionSource: ElementOptionSource
   label: string
@@ -203,6 +222,7 @@ export type AgentExecutionSnapshotSummary = {
   totalCandidates: number
   visibleCandidates: number
   inViewportCandidates: number
+  media: PageMediaSummary | null
   visibleTextPreview: string[]
   relatedOptions?: AgentExecutionPopupSummary
   target?: {

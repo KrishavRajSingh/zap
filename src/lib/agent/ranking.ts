@@ -16,6 +16,10 @@ export const rankCandidates = (
   const commandLower = command.toLowerCase()
   const typingIntent =
     /\b(type|enter|fill|input|write|search|formula|cell)\b/.test(commandLower)
+  const searchIntent =
+    /\b(search|find|look up|lookup|query|song|video|youtube)\b/.test(
+      commandLower
+    )
   const clearIntent =
     /\b(clear|reset|erase|empty|remove|wipe|blank out)\b/.test(commandLower)
   const fillIntent =
@@ -30,6 +34,69 @@ export const rankCandidates = (
     /\b(form|application|apply|profile|register|signup|sign up|submit)\b/.test(
       commandLower
     )
+  const hasSearchFieldCandidate = candidates.some((candidate) => {
+    const descriptor = [
+      candidate.label,
+      candidate.placeholder,
+      candidate.nameAttr,
+      candidate.idAttr,
+      candidate.autocomplete,
+      candidate.role ?? "",
+      candidate.text,
+      candidate.questionText,
+      candidate.context
+    ]
+      .join(" ")
+      .toLowerCase()
+
+    return (
+      candidate.enabled &&
+      candidate.visible &&
+      candidate.allowsTextEntry &&
+      /\b(search|searchbox|search_query|query|find)\b/.test(descriptor)
+    )
+  })
+
+  const isOptionOwnedByAnsweredControl = (candidate: ElementCandidate) => {
+    if (candidate.controlKind !== "select_option") {
+      return false
+    }
+
+    const matchingOwner = candidates.find((item) => {
+      if (
+        item.controlKind !== "custom_select" &&
+        item.controlKind !== "native_select"
+      ) {
+        return false
+      }
+
+      if (
+        item.frameId !== candidate.frameId ||
+        item.frameUrl !== candidate.frameUrl
+      ) {
+        return false
+      }
+
+      if (
+        candidate.ownerControlSelector &&
+        item.ownerControlSelector === candidate.ownerControlSelector
+      ) {
+        return true
+      }
+
+      const itemSelector = item.interactionSelector || item.selector
+      return (
+        candidate.ownerControlSelector.length > 0 &&
+        itemSelector === candidate.ownerControlSelector
+      )
+    })
+
+    if (matchingOwner) {
+      return matchingOwner.valuePreview.trim().length > 0
+    }
+
+    return false
+  }
 
   const scored = candidates.map((candidate) => {
     const haystack = [
@@ -82,12 +149,21 @@ export const rankCandidates = (
       candidate.role === "radio"
     const isSelectOption = candidate.controlKind === "select_option"
     const isCustomSelect = candidate.controlKind === "custom_select"
+    const isPickerLikeCustomSelect =
+      candidate.controlKind === "custom_select" && !candidate.allowsTextEntry
+    const isSearchField =
+      candidate.allowsTextEntry &&
+      /\b(search|searchbox|search_query|query|find)\b/.test(haystack)
+    const isSearchSubmitButton =
+      isButtonLike && /\b(search|submit|go)\b/.test(haystack)
     const hasValue = candidate.valuePreview.trim().length > 0
     const isSelected = candidate.checked === true
     const isLabelOption =
       candidate.tagName === "label" &&
       candidate.forAttr.length > 0 &&
       /\b(yes|no|true|false)\b/.test(candidate.text.toLowerCase())
+    const optionOwnedByAnsweredControl =
+      isOptionOwnedByAnsweredControl(candidate)
 
     let score = 0
 
@@ -125,16 +201,32 @@ export const rankCandidates = (
       score += 3
     }
 
+    if (searchIntent && isSearchField) {
+      score += 6
+    }
+
+    if (searchIntent && isSearchSubmitButton) {
+      score += 1
+    }
+
+    if (searchIntent && isSearchSubmitButton && hasSearchFieldCandidate) {
+      score -= 2
+    }
+
     if (typingIntent && !isEditable) {
       score -= 2
     }
 
-    if (typingIntent && isCustomSelect) {
+    if (typingIntent && isPickerLikeCustomSelect) {
       score -= 1
     }
 
     if (!clearIntent && fillIntent && isEditable && hasValue) {
       score -= 5
+    }
+
+    if (!clearIntent && fillIntent && isCustomSelect && hasValue) {
+      score -= 8
     }
 
     if (!clearIntent && fillIntent && isChoiceControl && isSelected) {
@@ -195,6 +287,10 @@ export const rankCandidates = (
 
     if (candidate.popupState === "open" && isSelectOption) {
       score += 3
+    }
+
+    if (fillIntent && isSelectOption && optionOwnedByAnsweredControl) {
+      score -= 12
     }
 
     if (candidate.required && isEditable) {
