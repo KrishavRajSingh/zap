@@ -59,6 +59,11 @@ type RunSession = {
     currentTime: number | null
     playbackState: MediaPlaybackState
   } | null
+  pendingMediaVerification: {
+    url: string
+    baselineCurrentTime: number | null
+    startedAt: number
+  } | null
 }
 
 const sessions = new Map<string, RunSession>()
@@ -2853,25 +2858,51 @@ const normalizeMediaSummary = (
   }
 
   const previousObservation = session?.lastMediaObservation
+  const pendingVerification = session?.pendingMediaVerification
   const progressing =
     previousObservation?.url === snapshot.url &&
     previousObservation.currentTime !== null &&
     media.currentTime !== null &&
     media.currentTime > previousObservation.currentTime + 0.4
 
+  const verifiedByRecentPlayClick =
+    pendingVerification?.url === snapshot.url &&
+    Date.now() - pendingVerification.startedAt <= 3000 &&
+    media.currentTime !== null &&
+    ((pendingVerification.baselineCurrentTime === null &&
+      media.currentTime > 0.4) ||
+      (pendingVerification.baselineCurrentTime !== null &&
+        media.currentTime > pendingVerification.baselineCurrentTime + 0.4))
+
   const normalizedSnapshot: PageSnapshot = {
     ...snapshot,
     media: {
       ...media,
-      progressing: progressing || media.playbackState === "playing"
+      playbackState:
+        verifiedByRecentPlayClick && media.playbackState !== "ended"
+          ? "playing"
+          : media.playbackState,
+      progressing:
+        progressing ||
+        media.playbackState === "playing" ||
+        verifiedByRecentPlayClick
     }
+  }
+
+  if (
+    session?.pendingMediaVerification &&
+    (verifiedByRecentPlayClick ||
+      Date.now() - session.pendingMediaVerification.startedAt > 3000)
+  ) {
+    session.pendingMediaVerification = null
   }
 
   if (session) {
     session.lastMediaObservation = {
       url: snapshot.url,
-      currentTime: media.currentTime,
-      playbackState: media.playbackState
+      currentTime: normalizedSnapshot.media?.currentTime ?? null,
+      playbackState:
+        normalizedSnapshot.media?.playbackState ?? media.playbackState
     }
   }
 
@@ -3071,6 +3102,7 @@ type DomActionPayload =
   | {
       kind: "click"
       target: DomTarget
+      baselineMediaCurrentTime?: number | null
     }
   | {
       kind: "type_text"
@@ -3115,6 +3147,17 @@ const runDomActionInPage = async (
       rect.height > 0 &&
       style.visibility !== "hidden" &&
       style.display !== "none"
+    )
+  }
+
+  const isInViewport = (element: HTMLElement) => {
+    const rect = element.getBoundingClientRect()
+
+    return (
+      rect.bottom >= 0 &&
+      rect.top <= window.innerHeight &&
+      rect.right >= 0 &&
+      rect.left <= window.innerWidth
     )
   }
 
@@ -3480,6 +3523,161 @@ const runDomActionInPage = async (
     }
 
     return popup
+  }
+
+  const isPlayLikeTarget = (target: DomTarget) => {
+    const descriptor = `${target.text} ${target.label}`.toLowerCase().trim()
+
+    return /\bplay\b/.test(descriptor) && !/\bautoplay\b/.test(descriptor)
+  }
+
+  const getBestMediaElement = () => {
+    const mediaElements = Array.from(document.querySelectorAll("video, audio"))
+      .filter((element): element is HTMLMediaElement => {
+        return element instanceof HTMLMediaElement
+      })
+      .sort((left, right) => {
+        const score = (element: HTMLMediaElement) => {
+          let value = 0
+
+          if (!element.paused && !element.ended) {
+            value += 10
+          }
+
+          if (isVisibleElement(element)) {
+            value += 4
+          }
+
+          if (isInViewport(element)) {
+            value += 2
+          }
+
+          if (element.currentTime > 0) {
+            value += 1
+          }
+
+          const rect = element.getBoundingClientRect()
+          return value + Math.round(rect.width * rect.height)
+        }
+
+        return score(right) - score(left)
+      })
+
+    return mediaElements[0] ?? null
+  }
+
+  const waitForMediaReady = async () => {
+    const isReady = (media: HTMLMediaElement | null) => {
+      if (!media) {
+        return false
+      }
+
+      if (!isVisibleElement(media) && !isInViewport(media)) {
+        return false
+      }
+
+      const hasUsableData =
+        media.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+      const hasDuration = Number.isFinite(media.duration) && media.duration > 0
+      const hasSource = Boolean(media.currentSrc)
+
+      return hasSource && (hasDuration || hasUsableData)
+    }
+
+    let media = getBestMediaElement()
+
+    if (isReady(media)) {
+      return {
+        ready: true,
+        details: "Media element is ready for playback"
+      }
+    }
+
+    for (const delayMs of [150, 250, 400, 600, 900]) {
+      await domDelay(delayMs)
+      media = getBestMediaElement()
+
+      if (isReady(media)) {
+        return {
+          ready: true,
+          details: "Media element became ready for playback"
+        }
+      }
+    }
+
+    return {
+      ready: false,
+      details: "Media element did not become ready before play click"
+    }
+  }
+
+  const verifyMediaPlayback = async (
+    baselineMediaCurrentTime?: number | null
+  ) => {
+    const media = getBestMediaElement()
+
+    if (!media) {
+      return {
+        verified: false,
+        details: "No media element found after play click"
+      }
+    }
+
+    const baselineTime =
+      typeof baselineMediaCurrentTime === "number"
+        ? baselineMediaCurrentTime
+        : media.currentTime
+    const sampleState = () => ({
+      currentTime: media.currentTime,
+      paused: media.paused,
+      ended: media.ended,
+      readyState: media.readyState
+    })
+
+    let latest = sampleState()
+
+    const isPlaying = (state: typeof latest) => {
+      if (state.ended) {
+        return false
+      }
+
+      if (state.currentTime > baselineTime + 0.4) {
+        return true
+      }
+
+      if (
+        !state.paused &&
+        state.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+      ) {
+        return true
+      }
+
+      return false
+    }
+
+    if (isPlaying(latest)) {
+      return {
+        verified: true,
+        details: `Verified media playback at ${latest.currentTime.toFixed(1)}s`
+      }
+    }
+
+    for (const delayMs of [200, 350, 500, 700, 900]) {
+      await domDelay(delayMs)
+      latest = sampleState()
+
+      if (isPlaying(latest)) {
+        return {
+          verified: true,
+          details: `Verified media playback at ${latest.currentTime.toFixed(1)}s`
+        }
+      }
+    }
+
+    return {
+      verified: false,
+      details: `Media still appears paused at ${latest.currentTime.toFixed(1)}s`
+    }
   }
 
   const recoverStaleSelectOptionTarget = async (
@@ -3989,6 +4187,7 @@ const runDomActionInPage = async (
       clickTarget.scrollIntoView({ block: "center", inline: "center" })
 
       let popupAfterInteraction: AgentExecutionPopupSummary | undefined
+      let mediaVerificationDetails: string | undefined
 
       if (
         payload.target.controlKind === "custom_select" &&
@@ -4024,14 +4223,36 @@ const runDomActionInPage = async (
         dispatchPointerClick(clickTarget)
         popupAfterInteraction = await waitForPopupState(clickTarget, 100, 2)
       } else {
+        if (isPlayLikeTarget(payload.target)) {
+          const mediaReady = await waitForMediaReady()
+          trace.resolutionStrategy = [
+            ...trace.resolutionStrategy,
+            mediaReady.ready ? "media_ready" : "media_not_ready"
+          ]
+        }
+
         clickTarget.click()
         await domDelay(80)
+
+        if (isPlayLikeTarget(payload.target)) {
+          const mediaVerification = await verifyMediaPlayback(
+            payload.baselineMediaCurrentTime
+          )
+          mediaVerificationDetails = mediaVerification.details
+          trace.resolutionStrategy = [
+            ...trace.resolutionStrategy,
+            mediaVerification.verified
+              ? "media_playback_verified"
+              : "media_playback_unverified"
+          ]
+        }
       }
 
       return {
         ok: true,
-        details:
-          clickTarget === element
+        details: mediaVerificationDetails
+          ? mediaVerificationDetails
+          : clickTarget === element
             ? "Clicked target element"
             : "Clicked associated visible target element",
         trace: {
@@ -4242,6 +4463,100 @@ const waitForPostActionSettle = async (
   }
 }
 
+const waitForSettledPostNavigationSnapshot = async (
+  tabId: number,
+  session: RunSession,
+  previousSnapshot: PageSnapshot
+) => {
+  const isGenericTitle = (title: string) => {
+    const normalizedTitle = title.trim().toLowerCase()
+
+    if (!normalizedTitle) {
+      return true
+    }
+
+    return ["youtube", "new tab", "about:blank"].includes(normalizedTitle)
+  }
+
+  const summarize = (snapshot: PageSnapshot) => ({
+    url: snapshot.url,
+    title: snapshot.title,
+    visibleText: snapshot.visibleTextPreview.slice(0, 6).join(" | "),
+    mediaDuration: snapshot.media?.duration ?? null,
+    mediaCurrentTime: snapshot.media?.currentTime ?? null,
+    mediaVisible: snapshot.media?.visible ?? false,
+    mediaInViewport: snapshot.media?.inViewport ?? false
+  })
+
+  const settledEnough = (snapshot: PageSnapshot) => {
+    const next = summarize(snapshot)
+    const previous = summarize(previousSnapshot)
+    const urlChanged = next.url !== previous.url
+    const titleChanged = next.title !== previous.title
+    const textChanged = next.visibleText !== previous.visibleText
+    const mediaChanged =
+      next.mediaDuration !== previous.mediaDuration ||
+      next.mediaCurrentTime !== previous.mediaCurrentTime ||
+      next.mediaVisible !== previous.mediaVisible ||
+      next.mediaInViewport !== previous.mediaInViewport
+
+    if (!urlChanged) {
+      return true
+    }
+
+    const nextLooksLikeUninitializedMediaPage =
+      Boolean(snapshot.media) &&
+      (snapshot.media.visible || snapshot.media.inViewport) &&
+      (snapshot.media.duration === null || snapshot.media.duration <= 0) &&
+      (snapshot.media.currentTime ?? 0) === 0 &&
+      (isGenericTitle(snapshot.title) || !textChanged)
+
+    if (nextLooksLikeUninitializedMediaPage) {
+      return false
+    }
+
+    if (titleChanged && textChanged) {
+      return true
+    }
+
+    if (textChanged && mediaChanged) {
+      return true
+    }
+
+    if (titleChanged && mediaChanged) {
+      return true
+    }
+
+    if (
+      snapshot.media &&
+      snapshot.media.duration !== null &&
+      snapshot.media.duration > 0
+    ) {
+      return true
+    }
+
+    return false
+  }
+
+  let latestSnapshot = await readSnapshot(tabId, session)
+
+  if (settledEnough(latestSnapshot)) {
+    return latestSnapshot
+  }
+
+  for (const delayMs of [250, 400, 600, 800, 1200, 1600]) {
+    await waitForInterruptibleDelay(session, delayMs)
+    assertRunNotStopped(session)
+    latestSnapshot = await readSnapshot(tabId, session)
+
+    if (settledEnough(latestSnapshot)) {
+      return latestSnapshot
+    }
+  }
+
+  return latestSnapshot
+}
+
 const normalizeDomActionResult = (
   rawResult: chrome.scripting.InjectionResult<unknown>[],
   fallbackDetails: string
@@ -4281,17 +4596,56 @@ const captureAfterActionSnapshot = async (
   }
 }
 
+const captureVerifiedMediaSnapshot = async (
+  tabId: number,
+  candidate: ElementCandidate,
+  session: RunSession,
+  initialSnapshot?: Awaited<ReturnType<typeof captureAfterActionSnapshot>>
+) => {
+  let latestSnapshot = initialSnapshot
+
+  const hasPlaybackEvidence = (
+    snapshot: Awaited<ReturnType<typeof captureAfterActionSnapshot>> | undefined
+  ) => {
+    const media = snapshot?.summary.media
+    return Boolean(
+      media &&
+      (media.playbackState === "playing" ||
+        media.progressing ||
+        (media.currentTime ?? 0) > 0.4)
+    )
+  }
+
+  if (hasPlaybackEvidence(latestSnapshot)) {
+    return latestSnapshot
+  }
+
+  for (const delayMs of [300, 500, 700]) {
+    await waitForInterruptibleDelay(session, delayMs)
+    assertRunNotStopped(session)
+    latestSnapshot = await captureAfterActionSnapshot(tabId, candidate, session)
+
+    if (hasPlaybackEvidence(latestSnapshot)) {
+      return latestSnapshot
+    }
+  }
+
+  return latestSnapshot
+}
+
 const runElementAction = async (
   tabId: number,
   candidate: ElementCandidate,
-  action: AgentAction
+  action: AgentAction,
+  baselineMediaCurrentTime?: number | null
 ) => {
   const target = buildDomTarget(candidate)
 
   if (action.type === "click") {
     const rawResult = await executeDomAction(tabId, candidate.frameId, {
       kind: "click",
-      target
+      target,
+      baselineMediaCurrentTime
     } as DomActionPayload)
 
     return normalizeDomActionResult(
@@ -4778,7 +5132,12 @@ const executeAction = async (
   }
 
   const previousTabUrl = action.type === "click" ? snapshot.url : snapshot.url
-  const result = await runElementAction(tabId, candidate, action)
+  const result = await runElementAction(
+    tabId,
+    candidate,
+    action,
+    snapshot.media?.currentTime ?? null
+  )
 
   if (
     result.ok &&
@@ -4819,6 +5178,14 @@ const executeAction = async (
   if (result.ok) {
     session.lastInteractionFrameId = candidate.frameId
 
+    if (action.type === "click" && isPlayButtonCandidate(candidate)) {
+      session.pendingMediaVerification = {
+        url: previousTabUrl,
+        baselineCurrentTime: snapshot.media?.currentTime ?? null,
+        startedAt: Date.now()
+      }
+    }
+
     let topLevelUrlChanged = false
 
     if (action.type === "click") {
@@ -4830,11 +5197,46 @@ const executeAction = async (
       }
     }
 
-    const afterSnapshot = await captureAfterActionSnapshot(
-      tabId,
-      candidate,
-      session
-    )
+    let afterSnapshot: Awaited<ReturnType<typeof captureAfterActionSnapshot>>
+
+    if (!topLevelUrlChanged) {
+      afterSnapshot = await captureAfterActionSnapshot(
+        tabId,
+        candidate,
+        session
+      )
+    }
+
+    if (topLevelUrlChanged) {
+      try {
+        const settledSnapshot = await waitForSettledPostNavigationSnapshot(
+          tabId,
+          session,
+          snapshot
+        )
+
+        afterSnapshot = {
+          snapshot: settledSnapshot,
+          popup: buildPopupSummaryFromSnapshot(settledSnapshot, candidate),
+          summary: buildAfterSnapshotSummary(settledSnapshot, candidate)
+        }
+      } catch {
+        afterSnapshot = await captureAfterActionSnapshot(
+          tabId,
+          candidate,
+          session
+        )
+      }
+    }
+
+    if (action.type === "click" && isPlayButtonCandidate(candidate)) {
+      afterSnapshot = await captureVerifiedMediaSnapshot(
+        tabId,
+        candidate,
+        session,
+        afterSnapshot
+      )
+    }
 
     if (
       action.type === "click" &&
@@ -5361,7 +5763,8 @@ const createSession = async (startMessage: AgentStartMessage) => {
     controlValueOverrides: new Map(),
     memoryLoaded: false,
     memoryCache: [],
-    lastMediaObservation: null
+    lastMediaObservation: null,
+    pendingMediaVerification: null
   }
 
   sessions.set(runId, session)
