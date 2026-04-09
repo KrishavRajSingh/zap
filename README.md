@@ -8,7 +8,7 @@ Agentic browser automation extension built with Plasmo + Next.js.
 - Background automation loop (snapshot -> plan -> execute -> verify)
 - Confirmation gate for sensitive click actions
 - Supabase email/password auth in sidepanel
-- Next.js planner APIs backed by OpenRouter (`google/gemini-2.5-pro` by default)
+- Next.js planner APIs backed by OpenRouter (`google/gemini-2.5-flash` by default)
 
 ## Setup
 
@@ -73,4 +73,5 @@ This runs both:
 - Planner and run-log APIs require a valid Supabase bearer token.
 - Keep `.env` private. Never commit your OpenRouter or Supabase keys.
 - Set `PLASMO_PUBLIC_AGENT_SAVE_RUN_LOGS=true` to write run logs into `.zap-logs/`.
+- Planner traces now persist the exact LLM input/output for each step at `.zap-logs/<day>/planner-traces/<runId>/step-XX-attempt-YY.json`.
 - Planner API health check: `http://localhost:1947/api/agent/health`

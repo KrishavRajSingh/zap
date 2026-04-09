@@ -1,7 +1,7 @@
 {
   "name": "zap",
   "displayName": "Zap",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Automate web tasks from plain English with live step logs and approval before sensitive actions.",
   "author": "Krishav",
   "contributors": [

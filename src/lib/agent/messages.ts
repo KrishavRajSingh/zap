@@ -1,8 +1,10 @@
 import type {
   AgentAction,
   AgentMemoryUpsertInput,
+  AgentStepExecution,
   AgentStepRecord,
-  PageSnapshot
+  PageSnapshot,
+  PlannerTraceReference
 } from "~lib/agent/types"
 
 export type AgentStartMessage = {
@@ -80,12 +82,14 @@ export type AgentEvent =
       action: AgentAction
       rationale: string
       snapshot: PageSnapshot
+      planner?: PlannerTraceReference
     }
   | {
       type: "step_result"
       runId: string
       step: number
       record: AgentStepRecord
+      execution?: AgentStepExecution
     }
   | {
       type: "confirmation_required"
