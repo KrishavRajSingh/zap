@@ -684,7 +684,10 @@ export const AgentConsole = ({ compact = false }: { compact?: boolean }) => {
         provider: "google",
         options: {
           redirectTo,
-          skipBrowserRedirect: true
+          skipBrowserRedirect: true,
+          queryParams: {
+            prompt: "select_account"
+          }
         }
       })
 
