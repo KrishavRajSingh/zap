@@ -2,6 +2,12 @@
 
 Agentic browser automation extension built with Plasmo + Next.js.
 
+
+
+https://github.com/user-attachments/assets/683b6b08-3f06-492c-94ff-edcf21e5d717
+
+
+
 ## What is implemented
 
 - Sidepanel agent console + popup launcher
